@@ -1,4 +1,4 @@
-"""Auto-trader de meme coins — stratégie maximisation capital."""
+"""Solana memecoin auto-trader — capital maximization strategy."""
 
 import asyncio
 import httpx
@@ -12,57 +12,57 @@ from meme_scanner import MemeCoin, MemeScanner
 from wallet_tracker import WalletTracker
 
 # ---------------------------------------------------------------------------
-# Paramètres de position
+# Position parameters
 # ---------------------------------------------------------------------------
-MEME_MAX_POSITION_SOL   = 0.08    # 0.08 SOL par trade — capital preservation (wallet ~0.89 SOL)
-MEME_TAKE_PROFIT_PCT    = 0.40    # TP final +40%
+MEME_MAX_POSITION_SOL   = 0.08    # 0.08 SOL per trade — capital preservation
+MEME_TAKE_PROFIT_PCT    = 0.40    # final TP +40%
 MEME_STOP_LOSS_PCT      = 0.15    # SL -15%
 MEME_TIMEOUT_SECONDS    = 2700    # 45 min max
-MAX_CONCURRENT_TRADES   = 2       # 2 positions max — 36% capital exposé
+MAX_CONCURRENT_TRADES   = 2       # max 2 positions — 36% capital exposed
 
-# Sortie partielle — déclenchée plus tôt car on entre plus haut sur le pump
-PARTIAL_SELL_TRIGGER    = 0.15    # vendre 50 % de la position à +15 % (était +20%)
-PARTIAL_SELL_RATIO      = 0.50    # 50 % des tokens vendus au déclencheur
+# Partial exit — triggers earlier because we enter higher into the pump
+PARTIAL_SELL_TRIGGER    = 0.15    # sell 50% of the position at +15% (was +20%)
+PARTIAL_SELL_RATIO      = 0.50    # 50% of tokens sold at trigger
 
-# Trailing stop (sur la moitié restante)
-TRAILING_ACTIVATE_PCT   = 0.12    # s'active à +12 % (était +15%)
-TRAILING_DISTANCE_PCT   = 0.05    # recule de 5 % depuis le pic
+# Trailing stop (on the remaining half)
+TRAILING_ACTIVATE_PCT   = 0.12    # activates at +12% (was +15%)
+TRAILING_DISTANCE_PCT   = 0.05    # pulls back 5% from the peak
 
-# Mode MOON — copy trade uniquement (pas de TP fixe, trailing large)
-MOON_TRAILING_DISTANCE  = 0.08    # 8% — laisse respirer les mega pumps
-MOON_MIN_GAIN_LOG       = 0.50    # log un avertissement si on sort sous +50% en moon mode
-MOON_MAX_AGE_HOURS      = 168     # 7 jours max même pour whale copy (bloque PsyopAnime 2483h, PVE 218h)
+# MOON mode — copy trade only (no fixed TP, wide trailing)
+MOON_TRAILING_DISTANCE  = 0.08    # 8% — gives mega pumps room to breathe
+MOON_MIN_GAIN_LOG       = 0.50    # log a warning if we exit below +50% in MOON mode
+MOON_MAX_AGE_HOURS      = 168     # 7 days max even for whale copies (blocks stale tokens)
 
 # ---------------------------------------------------------------------------
-# Critères d'entrée
+# Entry criteria
 # ---------------------------------------------------------------------------
-ENTRY_PUMP_1H_MIN       = 5.0     # +5% — momentum confirmé
-ENTRY_PUMP_1H_MAX       = 50.0    # max +50% 1h — DexScreener trending = déjà pompé naturellement
-ENTRY_PUMP_6H_MAX       = 500.0   # max +500% 6h — meme coins peuvent x5 et continuer
-ENTRY_BUY_RATIO_MIN     = 0.50    # 50% — majorité acheteurs
+ENTRY_PUMP_1H_MIN       = 5.0     # +5% — confirmed momentum
+ENTRY_PUMP_1H_MAX       = 50.0    # max +50% 1h — DexScreener trending = already pumped
+ENTRY_PUMP_6H_MAX       = 500.0   # max +500% 6h — memecoins can 5x and keep going
+ENTRY_BUY_RATIO_MIN     = 0.50    # 50% — majority of buyers
 ENTRY_AGE_MIN_HOURS     = 0.17    # 10min — early
-ENTRY_AGE_MAX_HOURS     = 4.0     # 4h max — ultra frais
-ENTRY_MIN_SCORE         = 30      # assouplit
+ENTRY_AGE_MAX_HOURS     = 4.0     # 4h max — ultra fresh
+ENTRY_MIN_SCORE         = 30      # loose
 ENTRY_MIN_LIQUIDITY     = 30_000  # $30K — small-caps OK
-ENTRY_MAX_VOL_LIQ_RATIO = 12.0    # Vol 1h / Liq < 12× — filtre pump épuisé
-ENTRY_MAX_RUGCHECK_RISK = 300     # on GARDE strict — pas de rug
-TRADE_COOLDOWN_SECONDS  = 10800   # 3h de cooldown après exit d'un token
+ENTRY_MAX_VOL_LIQ_RATIO = 12.0    # Vol 1h / Liq < 12× — pump exhaustion filter
+ENTRY_MAX_RUGCHECK_RISK = 300     # KEEP strict — no rugs
+TRADE_COOLDOWN_SECONDS  = 10800   # 3h cooldown after token exit
 
 # ---------------------------------------------------------------------------
-# Position dynamique — scale selon force du signal
+# Dynamic position — scales with signal strength
 # ---------------------------------------------------------------------------
-POSITION_BASE_SOL       = 0.08    # scanner seul ou 1 wallet
-POSITION_BOOST_2W_SOL   = 0.10    # 2 wallets alpha simultanés
-POSITION_BOOST_3W_SOL   = 0.12    # 3+ wallets alpha — signal très fort
+POSITION_BASE_SOL       = 0.08    # scanner alone or 1 wallet
+POSITION_BOOST_2W_SOL   = 0.10    # 2 simultaneous alpha wallets
+POSITION_BOOST_3W_SOL   = 0.12    # 3+ alpha wallets — very strong signal
 
 # ---------------------------------------------------------------------------
-# Blacklist auto — 24h après un SL
+# Auto blacklist — 24h after a SL
 # ---------------------------------------------------------------------------
-SL_BLACKLIST_HOURS      = 24      # token blacklisté 24h après avoir déclenché le SL
+SL_BLACKLIST_HOURS      = 24      # token blacklisted 24h after triggering SL
 
 # ---------------------------------------------------------------------------
-# Blacklist — stablecoins, base tokens, wrapped assets jamais tradeables
-# (évite l'achat accidentel d'USDC/wSOL via copy trade DexScreener pairs)
+# Blacklist — stablecoins, base tokens, wrapped assets never tradeable
+# (prevents accidental USDC/wSOL buys via DexScreener copy-trade pairs)
 # ---------------------------------------------------------------------------
 BLACKLISTED_TOKEN_ADDRESSES: set[str] = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
@@ -74,14 +74,14 @@ BLACKLISTED_TOKEN_ADDRESSES: set[str] = {
     "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj",   # stSOL (Lido)
     "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",    # bSOL (BlazeStake)
     "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",   # jitoSOL
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",   # BONK (éviter re-achat stale)
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",   # BONK (avoid stale re-buy)
     "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",   # RAY (Raydium — base token)
     "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",   # PYTH
 }
 
 # ---------------------------------------------------------------------------
 class RugChecker:
-    """Vérifie le risque de rug via rugcheck.xyz (gratuit)."""
+    """Rug risk check via rugcheck.xyz (free)."""
 
     API = "https://api.rugcheck.xyz/v1/tokens"
 
@@ -118,9 +118,9 @@ class RugChecker:
                     result["safe"] = result["score"] < ENTRY_MAX_RUGCHECK_RISK and not has_critical
 
                 elif resp.status_code == 404:
-                    result["error"] = "Token non trouvé sur rugcheck"
+                    result["error"] = "Token not found on rugcheck"
                 else:
-                    result["error"] = f"API erreur {resp.status_code}"
+                    result["error"] = f"API error {resp.status_code}"
         except Exception as e:
             result["error"] = str(e)
         return result
@@ -128,7 +128,7 @@ class RugChecker:
 
 # ---------------------------------------------------------------------------
 class MemeTrader:
-    """Bot meme coin avec sortie partielle + trailing stop + 2 trades simultanés."""
+    """Memecoin bot with partial exit + trailing stop + 2 simultaneous trades."""
 
     def __init__(self, keypair=None, pubkey: str = None):
         self.keypair  = keypair
@@ -137,9 +137,9 @@ class MemeTrader:
         self.scanner  = MemeScanner(wallet_tracker=self.wallet_tracker)
         self.rug_checker = RugChecker()
         self.active_trades: dict[str, dict] = {}
-        self.trade_cooldowns: dict[str, float] = {}  # token → timestamp exit
+        self.trade_cooldowns: dict[str, float] = {}  # token → exit timestamp
         self.skip_cache: dict[str, tuple] = {}        # token → (expiry_ts, reason)
-        self.sl_blacklist: dict[str, float] = {}      # token → expiry_ts (24h après SL)
+        self.sl_blacklist: dict[str, float] = {}      # token → expiry_ts (24h after SL)
         self.trade_count = 0
         self.wins  = 0
         self.losses = 0
@@ -159,12 +159,12 @@ class MemeTrader:
             self.pubkey  = str(kp.pubkey())
         self.log(f"Wallet: {self.pubkey}")
         bal = await wallet.get_sol_balance(self.pubkey)
-        self.log(f"Solde: {bal:.6f} SOL")
+        self.log(f"Balance: {bal:.6f} SOL")
         self.log(f"Mode: {'PAPER TRADE' if self.paper_mode else '⚠️  LIVE TRADE'}")
         self.log(f"Position: {MEME_MAX_POSITION_SOL} SOL | TP: +{MEME_TAKE_PROFIT_PCT*100:.0f}% "
                  f"| SL: -{MEME_STOP_LOSS_PCT*100:.0f}% | Max trades: {MAX_CONCURRENT_TRADES}")
-        self.log(f"Sortie partielle: 50% vendu à +{PARTIAL_SELL_TRIGGER*100:.0f}%"
-                 f" | Trailing: activé à +{TRAILING_ACTIVATE_PCT*100:.0f}%")
+        self.log(f"Partial exit: 50% sold at +{PARTIAL_SELL_TRIGGER*100:.0f}%"
+                 f" | Trailing: activates at +{TRAILING_ACTIVATE_PCT*100:.0f}%")
 
     # ------------------------------------------------------------------
     async def validate_entry(self, token: MemeCoin, score: dict) -> dict:
@@ -172,37 +172,37 @@ class MemeTrader:
         moon_mode        = getattr(token, 'copy_trade',   False)
         new_listing_mode = getattr(token, 'new_listing',  False)
 
-        # ── Blacklist auto SL — token ayant déjà déclenché un SL récemment ──
-        # Évite de re-rentrer sur un token en distribution / tendance baissière.
+        # ── Auto SL blacklist — token that recently hit a SL ──────────────
+        # Avoid re-entering on a token in distribution / downtrend.
         sl_expiry = self.sl_blacklist.get(token.address, 0)
         if time.time() < sl_expiry:
             remaining_h = int((sl_expiry - time.time()) / 3600) + 1
-            result["reason"] = f"Blacklist auto (SL récent) — {remaining_h}h restantes"
+            result["reason"] = f"Auto blacklist (recent SL) — {remaining_h}h remaining"
             return result
         elif sl_expiry > 0:
-            del self.sl_blacklist[token.address]  # expiré, on nettoie
+            del self.sl_blacklist[token.address]  # expired, clean up
 
-# ── Blacklist universelle — stablecoins / base tokens ─────────────
-        # DexScreener renvoie les DEUX tokens d'une paire — sans ce filtre,
-        # copier un wallet qui achète TOKEN/USDC ferait acheter USDC lui-même.
+        # ── Universal blacklist — stablecoins / base tokens ───────────────
+        # DexScreener returns BOTH tokens of a pair — without this filter,
+        # copying a wallet that buys TOKEN/USDC would buy USDC itself.
         if token.address in BLACKLISTED_TOKEN_ADDRESSES:
-            result["reason"] = f"Token blacklisté (stablecoin/base): {token.symbol}"
+            result["reason"] = f"Blacklisted token (stablecoin/base): {token.symbol}"
             return result
-        # Heuristique prix : un stablecoin a toujours ~$1 ± 5%
+        # Price heuristic: a stablecoin always sits at ~$1 ± 5%
         if 0.95 <= token.price_usd <= 1.05 and token.market_cap > 500_000_000:
-            result["reason"] = f"Probable stablecoin (prix ${token.price_usd:.4f}, mcap ${token.market_cap/1e9:.1f}B)"
+            result["reason"] = f"Likely stablecoin (price ${token.price_usd:.4f}, mcap ${token.market_cap/1e9:.1f}B)"
             return result
 
-        # ── MODE NEW LISTING (migration pump.fun → Raydium < 20min) ─────────
-        # Token qui vient de lister sur Raydium : potentiel x2-x10 dans les 30min.
-        # Pas de données 1h disponibles → critères adaptés.
-        # Rug check STRICT (nouvelles listings = terrain de rugs fréquents).
+        # ── NEW LISTING MODE (pump.fun → Raydium migration < 20min) ───────
+        # Token just listed on Raydium: 2x-10x potential in the next 30min.
+        # No 1h data available → criteria adapted.
+        # STRICT rug check (new listings are common rug terrain).
         if new_listing_mode and not moon_mode:
             if token.price_usd <= 0 or token.price_usd < 1e-10:
-                result["reason"] = "[NEW] Prix indisponible"
+                result["reason"] = "[NEW] Price unavailable"
                 return result
             if token.liquidity_usd < 15_000:
-                result["reason"] = f"[NEW] Liquidité trop faible: ${token.liquidity_usd:.0f}"
+                result["reason"] = f"[NEW] Liquidity too low: ${token.liquidity_usd:.0f}"
                 return result
             total_txns = token.txns_1h_buys + token.txns_1h_sells
             if total_txns > 10:
@@ -211,213 +211,213 @@ class MemeTrader:
                     result["reason"] = f"[NEW] Sell pressure: {buy_ratio*100:.0f}% buys (min 55%)"
                     return result
             if token.address in self.active_trades:
-                result["reason"] = "Déjà en position sur ce token"
+                result["reason"] = "Already in position on this token"
                 return result
             cooldown_until = self.trade_cooldowns.get(token.address, 0)
             if time.time() < cooldown_until:
                 remaining_min = int((cooldown_until - time.time()) / 60)
-                result["reason"] = f"Cooldown actif — {remaining_min}min restantes"
+                result["reason"] = f"Cooldown active — {remaining_min}min remaining"
                 return result
             if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
-                result["reason"] = f"Max {MAX_CONCURRENT_TRADES} trades simultanés atteint"
+                result["reason"] = f"Max {MAX_CONCURRENT_TRADES} simultaneous trades reached"
                 return result
-            # Rug check strict — timeout = skip (pas assez de confiance sans données)
-            self.log(f"[NEW] 🆕 Rug check {token.symbol} (migration pump.fun→Raydium)...")
+            # Strict rug check — timeout = skip (not enough confidence without data)
+            self.log(f"[NEW] 🆕 Rug check {token.symbol} (pump.fun→Raydium migration)...")
             try:
                 rug = await asyncio.wait_for(self.rug_checker.check(token.address), timeout=8.0)
             except asyncio.TimeoutError:
-                result["reason"] = "[NEW] Rugcheck timeout — skip (prudence nouvelle listing)"
+                result["reason"] = "[NEW] Rugcheck timeout — skip (new listing caution)"
                 return result
             result["rug"] = rug
-            risks_str = ', '.join(rug.get('risks', [])[:3]) or 'aucun'
-            self.log(f"  [NEW] Score: {rug['score']} | LP locked: {rug['lp_locked']} | Risques: {risks_str}")
+            risks_str = ', '.join(rug.get('risks', [])[:3]) or 'none'
+            self.log(f"  [NEW] Score: {rug['score']} | LP locked: {rug['lp_locked']} | Risks: {risks_str}")
             critical = ["Freeze Authority still enabled", "Mint Authority still enabled", "Honeypot"]
             if any(r in rug.get("risks", []) for r in critical):
-                result["reason"] = "[NEW] RUG CRITIQUE — skip"
+                result["reason"] = "[NEW] RUG CRITICAL — skip"
                 return result
-            if rug["score"] > 300:  # seuil strict = même que mode normal
+            if rug["score"] > 300:  # strict threshold = same as normal mode
                 result["reason"] = f"[NEW] RUG RISK: {rug['score']}"
                 return result
             result["ok"] = True
             return result
 
-        # ── MODE MOON (copy trade) : filtres allégés ─────────────────────
-        # On fait confiance au whale — seuls rug check + position check actifs
+        # ── MOON MODE (copy trade): relaxed filters ───────────────────────
+        # We trust the whale — only rug check + position check are active.
         if moon_mode:
             if token.price_usd <= 0 or token.price_usd < 1e-10:
-                # 1e-10 = prix en dessous de la précision DexScreener (s'affiche $0.00000000)
-                # monitor_and_sell ne peut pas calculer de PnL correct → entrée refusée
-                result["reason"] = f"[MOON] Prix trop petit ou nul: ${token.price_usd:.2e}"
+                # 1e-10 = price below DexScreener precision (displays $0.00000000)
+                # monitor_and_sell can't compute a correct PnL → entry refused
+                result["reason"] = f"[MOON] Price too small or zero: ${token.price_usd:.2e}"
                 return result
-            if token.liquidity_usd < 5_000:   # seuil minimal anti-honeypot
-                result["reason"] = f"[MOON] Liquidité trop faible: ${token.liquidity_usd:.0f}"
+            if token.liquidity_usd < 5_000:   # minimum threshold, anti-honeypot
+                result["reason"] = f"[MOON] Liquidity too low: ${token.liquidity_usd:.0f}"
                 return result
-            # Filtre volume minimum : Kirkslop avait $6K vol/h → dead token, SL déclenché.
-            # $25K minimum = liquidité suffisante pour que le copy trade soit encore actif.
+            # Minimum volume filter: Kirkslop had $6K vol/h → dead token, SL hit.
+            # $25K minimum = enough liquidity for the copy trade to still be active.
             if token.volume_1h < 25_000:
-                result["reason"] = f"[MOON] Volume 1h trop faible: ${token.volume_1h:.0f} — token mort ou trop early"
+                result["reason"] = f"[MOON] Volume 1h too low: ${token.volume_1h:.0f} — dead token or too early"
                 return result
             if token.age_hours > MOON_MAX_AGE_HOURS:
-                result["reason"] = f"[MOON] Token trop vieux: {token.age_hours:.0f}h (max {MOON_MAX_AGE_HOURS}h)"
+                result["reason"] = f"[MOON] Token too old: {token.age_hours:.0f}h (max {MOON_MAX_AGE_HOURS}h)"
                 return result
-            # Filtre entrée tardive : si déjà +60% en 5min, on rentre au pic local
-            # Le whale a acheté, les copycats ont suivi, la vague est passée.
-            # Seuil 60% (pas 40%) car les gros pumps MOON peuvent continuer même après un spike initial.
+            # Late entry filter: if already +60% in 5min, we'd enter at the local peak.
+            # The whale bought, copycats followed, the wave is gone.
+            # 60% threshold (not 40%) because big MOON pumps can keep going past an initial spike.
             if token.price_change_5m > 60:
-                result["reason"] = f"[MOON] Entrée tardive: +{token.price_change_5m:.0f}% en 5min — pic local probable"
+                result["reason"] = f"[MOON] Late entry: +{token.price_change_5m:.0f}% in 5min — likely local peak"
                 return result
-            # Filtre pompe déjà faite : +500%+ en 1h = le whale a acheté bien avant la détection.
-            # SCRIBBLE : +1605% en 1h, seulement +14.9% en 5min → sommet déjà atteint → SL en 68s.
-            # On copie le wallet APRÈS la vague, pas pendant. On passe.
+            # Pump-already-done filter: +500%+ in 1h = whale bought way before detection.
+            # SCRIBBLE: +1605% in 1h, only +14.9% in 5min → top already reached → SL in 68s.
+            # We'd copy the wallet AFTER the wave, not during. Skip.
             if token.price_change_1h > 500:
-                result["reason"] = f"[MOON] Pompe déjà faite: +{token.price_change_1h:.0f}% en 1h — copy trop tardif"
+                result["reason"] = f"[MOON] Pump already done: +{token.price_change_1h:.0f}% in 1h — copy too late"
                 return result
-            # Filtre dump actif 5min
+            # Active 5min dump filter
             if token.price_change_5m < -15:
-                result["reason"] = f"[MOON] Dump actif: {token.price_change_5m:.0f}% en 5min — whale déjà sorti"
+                result["reason"] = f"[MOON] Active dump: {token.price_change_5m:.0f}% in 5min — whale already exited"
                 return result
-            # Filtre tendance 1h négative : si le token baisse depuis 1h, le whale a acheté
-            # bien avant le signal. Tendies : -18.4% 1h + rebond +13% 5min = dead cat bounce → SL -15.8%.
+            # Negative 1h trend filter: if token's been falling for 1h, the whale bought
+            # well before the signal. Tendies: -18.4% 1h + +13% 5min bounce = dead cat → SL -15.8%.
             if token.price_change_1h < -15:
-                result["reason"] = f"[MOON] Tendance baissière 1h: {token.price_change_1h:.0f}% — copy trop tardif"
+                result["reason"] = f"[MOON] Downtrend 1h: {token.price_change_1h:.0f}% — copy too late"
                 return result
             if token.address in self.active_trades:
-                result["reason"] = "Déjà en position sur ce token"
+                result["reason"] = "Already in position on this token"
                 return result
             cooldown_until = self.trade_cooldowns.get(token.address, 0)
             if time.time() < cooldown_until:
                 remaining_min = int((cooldown_until - time.time()) / 60)
-                result["reason"] = f"Cooldown actif — {remaining_min}min restantes"
+                result["reason"] = f"Cooldown active — {remaining_min}min remaining"
                 return result
             if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
-                result["reason"] = f"Max {MAX_CONCURRENT_TRADES} trades simultanés atteint"
+                result["reason"] = f"Max {MAX_CONCURRENT_TRADES} simultaneous trades reached"
                 return result
-            self.log(f"[MOON] 🌙 Rug check {token.symbol} (copié depuis wallet alpha)...")
+            self.log(f"[MOON] 🌙 Rug check {token.symbol} (copied from alpha wallet)...")
             try:
-                # Hard deadline 8s — un rug check lent ne bloque pas le scan loop
+                # Hard deadline 8s — a slow rug check must not block the scan loop
                 rug = await asyncio.wait_for(self.rug_checker.check(token.address), timeout=8.0)
             except asyncio.TimeoutError:
-                self.log(f"  [MOON] Rugcheck timeout ({token.symbol}) — on entre quand même (whale trust)")
+                self.log(f"  [MOON] Rugcheck timeout ({token.symbol}) — entering anyway (whale trust)")
                 rug = {"safe": True, "score": 0, "risks": [], "lp_locked": False, "top10_pct": 0, "error": "Timeout"}
             result["rug"] = rug
             rug_err = rug.get("error")
             if rug_err and rug_err != "Timeout":
-                # 404 = token pas encore indexé sur rugcheck (souvent très récent)
-                # Autres erreurs = API down / réseau
-                # Dans les deux cas : score par défaut = 999 (pas de vraie donnée)
-                # → on N'entre PAS sur score 999 par défaut, trop risqué
-                not_indexed = "non trouvé" in str(rug_err) or "404" in str(rug_err)
+                # 404 = token not yet indexed on rugcheck (often very recent)
+                # Other errors = API down / network
+                # In both cases: default score = 999 (no real data)
+                # → we DON'T enter on default score 999, too risky
+                not_indexed = "not found" in str(rug_err).lower() or "404" in str(rug_err)
                 if not_indexed:
-                    self.log(f"  [MOON] Token non indexé sur rugcheck — skip par prudence (score inconnu)")
-                    result["reason"] = "[MOON] Rugcheck : token non indexé — skip"
+                    self.log(f"  [MOON] Token not indexed on rugcheck — skip (unknown score)")
+                    result["reason"] = "[MOON] Rugcheck: token not indexed — skip"
                     return result
                 else:
-                    # Autre erreur API (timeout réseau etc.) → whale trust
-                    self.log(f"  [MOON] Rugcheck erreur: {rug_err} — on entre quand même (whale trust)")
+                    # Other API error (network timeout, etc.) → whale trust
+                    self.log(f"  [MOON] Rugcheck error: {rug_err} — entering anyway (whale trust)")
             else:
-                risks_str = ', '.join(rug.get('risks', [])[:3]) or 'aucun'
-                self.log(f"  [MOON] Score: {rug['score']} | LP locked: {rug['lp_locked']} | Risques: {risks_str}")
+                risks_str = ', '.join(rug.get('risks', [])[:3]) or 'none'
+                self.log(f"  [MOON] Score: {rug['score']} | LP locked: {rug['lp_locked']} | Risks: {risks_str}")
                 critical = ["Freeze Authority still enabled", "Mint Authority still enabled", "Honeypot"]
                 if any(r in rug.get("risks", []) for r in critical):
-                    result["reason"] = "[MOON] RUG CRITIQUE — skip"
+                    result["reason"] = "[MOON] RUG CRITICAL — skip"
                     return result
-                # Multi-wallet boost : 2+ wallets = confiance accrue → seuil rug relevé
-                # Raisonnement : si plusieurs whales indépendants achètent simultanément,
-                # la probabilité d'un rug coordonné est beaucoup plus faible.
+                # Multi-wallet boost: 2+ wallets = higher confidence → raised rug threshold
+                # Reasoning: if multiple independent whales buy at the same time,
+                # the probability of a coordinated rug is much lower.
                 wallet_hits = getattr(token, 'wallet_hit_count', 0)
                 max_rug_score = 600 if wallet_hits >= 2 else 450
                 if wallet_hits >= 2:
-                    self.log(f"  [MOON] ⚡ Signal fort: {wallet_hits} wallets ont acheté — seuil rug relevé à {max_rug_score}")
+                    self.log(f"  [MOON] ⚡ Strong signal: {wallet_hits} wallets bought — rug threshold raised to {max_rug_score}")
                 if rug["score"] > max_rug_score:
-                    result["reason"] = f"[MOON] RUG RISK trop élevé: {rug['score']}"
+                    result["reason"] = f"[MOON] RUG RISK too high: {rug['score']}"
                     return result
             result["ok"] = True
             return result
 
-        # ── MODE NORMAL (scanner) : filtres complets ─────────────────────
+        # ── NORMAL MODE (scanner): full filters ───────────────────────────
         if token.price_usd < 1e-10:
-            result["reason"] = f"Prix trop petit: ${token.price_usd:.2e} (précision DexScreener insuffisante)"
+            result["reason"] = f"Price too small: ${token.price_usd:.2e} (DexScreener precision insufficient)"
             return result
         if token.price_change_1h < ENTRY_PUMP_1H_MIN:
-            result["reason"] = f"Pump 1h insuffisant: {token.price_change_1h:.1f}%"
+            result["reason"] = f"Insufficient 1h pump: {token.price_change_1h:.1f}%"
             return result
         if token.price_change_1h > ENTRY_PUMP_1H_MAX:
-            result["reason"] = f"Déjà trop pompé: {token.price_change_1h:.1f}%"
+            result["reason"] = f"Already too pumped: {token.price_change_1h:.1f}%"
             return result
         if abs(token.price_change_6h) > ENTRY_PUMP_6H_MAX:
-            result["reason"] = f"Pump 6h trop élevé: {token.price_change_6h:.1f}%"
+            result["reason"] = f"6h pump too high: {token.price_change_6h:.1f}%"
             return result
 
         total_txns = token.txns_1h_buys + token.txns_1h_sells
         if total_txns > 0:
             buy_ratio = token.txns_1h_buys / total_txns
             if buy_ratio < ENTRY_BUY_RATIO_MIN:
-                result["reason"] = f"Trop de sells: {buy_ratio*100:.0f}% buys"
+                result["reason"] = f"Too many sells: {buy_ratio*100:.0f}% buys"
                 return result
 
         if token.age_hours < ENTRY_AGE_MIN_HOURS:
-            result["reason"] = f"Token trop récent: {token.age_hours:.1f}h"
+            result["reason"] = f"Token too recent: {token.age_hours:.1f}h"
             return result
         if token.age_hours > ENTRY_AGE_MAX_HOURS:
-            result["reason"] = f"Token trop vieux: {token.age_hours:.1f}h"
+            result["reason"] = f"Token too old: {token.age_hours:.1f}h"
             return result
-        # Filtre dump actif scanner : -20% en 5min = distribution en cours.
-        # BABYTROLL : -22.1% 5min à l'entrée → gap-rug de -35.8% (SL skippé).
-        # Si le token baisse déjà vite, le pump 1h est terminé — on entre dans le dump.
+        # Scanner active dump filter: -20% in 5min = distribution in progress.
+        # BABYTROLL: -22.1% 5min at entry → gap-rug -35.8% (SL skipped).
+        # If the token is already falling fast, the 1h pump is done — we'd enter the dump.
         if hasattr(token, 'price_change_5m') and token.price_change_5m < -20:
-            result["reason"] = f"Dump actif: {token.price_change_5m:.0f}% en 5min — distribution en cours"
+            result["reason"] = f"Active dump: {token.price_change_5m:.0f}% in 5min — distribution in progress"
             return result
         if token.liquidity_usd < ENTRY_MIN_LIQUIDITY:
-            result["reason"] = f"Liquidité insuffisante: ${token.liquidity_usd/1000:.0f}K"
+            result["reason"] = f"Low liquidity: ${token.liquidity_usd/1000:.0f}K"
             return result
-        # Filtre pump épuisé : si volume >> liquidité, tout le monde est déjà passé
+        # Pump-exhausted filter: if volume >> liquidity, everyone's already in
         if token.liquidity_usd > 0:
             vol_liq = token.volume_1h / token.liquidity_usd
             if vol_liq > ENTRY_MAX_VOL_LIQ_RATIO:
-                result["reason"] = f"Pump épuisé: Vol/Liq {vol_liq:.1f}× (max {ENTRY_MAX_VOL_LIQ_RATIO}×)"
+                result["reason"] = f"Pump exhausted: Vol/Liq {vol_liq:.1f}× (max {ENTRY_MAX_VOL_LIQ_RATIO}×)"
                 return result
         if score["points"] < ENTRY_MIN_SCORE:
-            result["reason"] = f"Score trop bas: {score['points']}"
+            result["reason"] = f"Score too low: {score['points']}"
             return result
         if token.address in self.active_trades:
-            result["reason"] = "Déjà en position sur ce token"
+            result["reason"] = "Already in position on this token"
             return result
 
-        # Cooldown 3h après exit
+        # 3h cooldown after exit
         cooldown_until = self.trade_cooldowns.get(token.address, 0)
         if time.time() < cooldown_until:
             remaining_min = int((cooldown_until - time.time()) / 60)
-            result["reason"] = f"Cooldown actif — {remaining_min}min restantes"
+            result["reason"] = f"Cooldown active — {remaining_min}min remaining"
             return result
 
         if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
-            result["reason"] = f"Max {MAX_CONCURRENT_TRADES} trades simultanés atteint"
+            result["reason"] = f"Max {MAX_CONCURRENT_TRADES} simultaneous trades reached"
             return result
 
-        # Rug check — hard deadline 12s pour ne pas bloquer le scan loop
+        # Rug check — hard deadline 12s to not block the scan loop
         self.log(f"Rug check {token.symbol}...")
         try:
             rug = await asyncio.wait_for(self.rug_checker.check(token.address), timeout=12.0)
         except asyncio.TimeoutError:
-            self.log(f"  Rugcheck timeout ({token.symbol}) — skip par prudence")
+            self.log(f"  Rugcheck timeout ({token.symbol}) — skip (caution)")
             result["reason"] = f"Rugcheck timeout — skip"
             return result
         result["rug"] = rug
 
         if rug["error"]:
-            self.log(f"  Rugcheck erreur: {rug['error']} — prudence")
+            self.log(f"  Rugcheck error: {rug['error']} — caution")
         else:
             self.log(f"  Score: {rug['score']} | LP locked: {rug['lp_locked']} | Top10: {rug['top10_pct']:.1f}%")
             if rug["risks"]:
-                self.log(f"  Risques: {', '.join(rug['risks'][:3])}")
+                self.log(f"  Risks: {', '.join(rug['risks'][:3])}")
             if not rug["safe"]:
                 result["reason"] = f"RUG RISK — score: {rug['score']}"
                 return result
             if rug["top10_pct"] > 70:
-                result["reason"] = f"Top 10 trop concentrés: {rug['top10_pct']:.1f}%"
+                result["reason"] = f"Top 10 too concentrated: {rug['top10_pct']:.1f}%"
                 return result
 
-            # Blacklist risques spécifiques qui précèdent un rug
+            # Blacklist specific risks that often precede a rug
             rug_red_flags = [
                 "Low amount of LP Providers",
                 "Single LP Provider",
@@ -438,7 +438,7 @@ class MemeTrader:
         if rug:
             rug_err = rug.get("error")
             if rug_err and rug_err != "Timeout":
-                rug_score = "ERR"   # erreur API (pas un vrai score) — ne pas afficher 999
+                rug_score = "ERR"   # API error (not a real score) — don't display 999
             else:
                 rug_score = rug.get("score", "?")
         else:
@@ -448,30 +448,30 @@ class MemeTrader:
         new_listing_mode = getattr(token, 'new_listing', False)
         wallet_hits      = getattr(token, 'wallet_hit_count', 0)
         if moon_mode:
-            source_tag = "🌙 COPY TRADE — MODE MOON"
+            source_tag = "🌙 COPY TRADE — MOON MODE"
             if wallet_hits >= 2:
-                source_tag = f"🔥 COPY TRADE x{wallet_hits} WALLETS — MODE MOON"
-            strat_str  = f"Trailing -{MOON_TRAILING_DISTANCE*100:.0f}% depuis pic | Pas de TP fixe | Ride until drop"
+                source_tag = f"🔥 COPY TRADE x{wallet_hits} WALLETS — MOON MODE"
+            strat_str  = f"Trailing -{MOON_TRAILING_DISTANCE*100:.0f}% from peak | No fixed TP | Ride until drop"
         elif new_listing_mode:
-            source_tag = "🆕 NOUVELLE LISTING RAYDIUM — MODE MOON"
-            strat_str  = f"Trailing -{MOON_TRAILING_DISTANCE*100:.0f}% depuis pic | Pas de TP fixe | Ride until drop"
+            source_tag = "🆕 NEW RAYDIUM LISTING — MOON MODE"
+            strat_str  = f"Trailing -{MOON_TRAILING_DISTANCE*100:.0f}% from peak | No fixed TP | Ride until drop"
         else:
-            source_tag = "📊 SCANNER — MODE NORMAL"
-            strat_str  = f"50% sorti à +{PARTIAL_SELL_TRIGGER*100:.0f}% → trailing -{TRAILING_DISTANCE_PCT*100:.0f}% | TP +{MEME_TAKE_PROFIT_PCT*100:.0f}%"
+            source_tag = "📊 SCANNER — NORMAL MODE"
+            strat_str  = f"50% exit at +{PARTIAL_SELL_TRIGGER*100:.0f}% → trailing -{TRAILING_DISTANCE_PCT*100:.0f}% | TP +{MEME_TAKE_PROFIT_PCT*100:.0f}%"
         pump5_str = f" | 5min: {token.price_change_5m:+.1f}%" if token.price_change_5m else ""
         return f"""
 {'='*58}
-🚀 MEME TRADE N°{self.trade_count} — {'PAPER' if self.paper_mode else 'LIVE'} | {source_tag}
+🚀 MEME TRADE #{self.trade_count} — {'PAPER' if self.paper_mode else 'LIVE'} | {source_tag}
 Token     : {token.symbol} ({token.name})
-Adresse   : {token.address}
-Prix      : ${token.price_usd:.8f}
+Address   : {token.address}
+Price     : ${token.price_usd:.8f}
 Pump 1h   : {token.price_change_1h:+.1f}%{pump5_str}
-Liquidité : ${token.liquidity_usd/1000:.0f}K  |  Vol 1h: ${token.volume_1h/1000:.0f}K
+Liquidity : ${token.liquidity_usd/1000:.0f}K  |  Vol 1h: ${token.volume_1h/1000:.0f}K
 Age       : {token.age_hours:.1f}h
 Rug score : {rug_score}/1000 | LP locked: {lp_str}
-Signaux   : {' | '.join(score['flags']) if score['flags'] else '-'}
+Signals   : {' | '.join(score['flags']) if score['flags'] else '-'}
 Position  : {MEME_MAX_POSITION_SOL} SOL
-Stratégie : {strat_str}
+Strategy  : {strat_str}
 SL        : -{MEME_STOP_LOSS_PCT*100:.0f}%
 Chart     : https://dexscreener.com/solana/{token.address}
 {'='*58}"""
@@ -482,22 +482,22 @@ Chart     : https://dexscreener.com/solana/{token.address}
             self.log(f"[PAPER] BUY {token.symbol} @ ${token.price_usd:.8f}")
             return True
 
-        # MOON (copy trade / new listing) : pump rapide → slippage 500 bps pour éviter
-        # les "Slippage exceeded" qui forcent un retry et font acheter dans le dump.
-        # QuantumCat : 150 bps → 2 échecs slippage → acheté à -49% → SL -48%.
+        # MOON (copy trade / new listing): fast pump → 500 bps slippage to avoid
+        # "Slippage exceeded" errors that force a retry and make us buy into the dump.
+        # QuantumCat: 150 bps → 2 slippage failures → bought at -49% → SL -48%.
         is_moon = getattr(token, 'copy_trade', False) or getattr(token, 'new_listing', False)
         buy_slippage = 500 if is_moon else 150
 
-        # Position dynamique selon force du signal (wallet_hit_count)
-        # 3+ wallets simultanés = signal exceptionnel → on mise plus
-        # Scanner seul = signal faible → position de base
+        # Dynamic position size based on signal strength (wallet_hit_count)
+        # 3+ wallets simultaneously = exceptional signal → bet more
+        # Scanner alone = weak signal → base position
         wallet_hits = getattr(token, 'wallet_hit_count', 0)
         if wallet_hits >= 3:
             position_sol = POSITION_BOOST_3W_SOL
-            self.log(f"  💰 Position boostée {position_sol} SOL ({wallet_hits} wallets simultanés)")
+            self.log(f"  💰 Position boosted to {position_sol} SOL ({wallet_hits} simultaneous wallets)")
         elif wallet_hits >= 2:
             position_sol = POSITION_BOOST_2W_SOL
-            self.log(f"  💰 Position boostée {position_sol} SOL ({wallet_hits} wallets simultanés)")
+            self.log(f"  💰 Position boosted to {position_sol} SOL ({wallet_hits} simultaneous wallets)")
         else:
             position_sol = POSITION_BASE_SOL
 
@@ -508,31 +508,31 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 slippage_bps=buy_slippage, taker=self.pubkey,
             )
             if not order:
-                self.log(f"❌ BUY {token.symbol}: get_quote retourné vide")
+                self.log(f"❌ BUY {token.symbol}: get_quote returned empty")
                 return False
-            # Vérifier si Jupiter a retourné une erreur dans le body
+            # Check if Jupiter returned an error in the body
             if "error" in order or "code" in order:
-                self.log(f"❌ BUY {token.symbol}: Jupiter erreur — {order.get('error') or order.get('message', order)}")
+                self.log(f"❌ BUY {token.symbol}: Jupiter error — {order.get('error') or order.get('message', order)}")
                 return False
             swap_tx = order.get("transaction") or order.get("swapTransaction")
             if not swap_tx:
-                self.log(f"❌ BUY {token.symbol}: pas de transaction dans le quote — {list(order.keys())}")
+                self.log(f"❌ BUY {token.symbol}: no transaction in quote — {list(order.keys())}")
                 return False
             signed_tx = wallet.sign_transaction(swap_tx, self.keypair)
             result = await jupiter.execute_swap(signed_tx, request_id=order.get("requestId"))
             if result and result.get("status", "").lower() == "success":
-                self.log(f"✅ BUY {token.symbol} confirmé: {result.get('signature','')[:20]}...")
+                self.log(f"✅ BUY {token.symbol} confirmed: {result.get('signature','')[:20]}...")
                 return True
             else:
-                self.log(f"❌ BUY {token.symbol} échoué: status={result.get('status') if result else 'None'} | {result}")
+                self.log(f"❌ BUY {token.symbol} failed: status={result.get('status') if result else 'None'} | {result}")
                 return False
         except Exception as e:
-            self.log(f"Erreur BUY {token.symbol}: [{type(e).__name__}] {e or '(message vide)'}")
+            self.log(f"BUY error {token.symbol}: [{type(e).__name__}] {e or '(empty message)'}")
             return False
 
     # ------------------------------------------------------------------
     async def execute_sell(self, token: MemeCoin, ratio: float = 1.0) -> bool:
-        """Vend `ratio` de la position (1.0 = tout, 0.5 = moitié)."""
+        """Sell `ratio` of the position (1.0 = all, 0.5 = half)."""
         if self.paper_mode:
             pct = int(ratio * 100)
             self.log(f"[PAPER] SELL {pct}% {token.symbol}")
@@ -540,7 +540,7 @@ Chart     : https://dexscreener.com/solana/{token.address}
         try:
             token_balance = await wallet.get_token_balance(self.pubkey, token.address)
             if token_balance <= 0:
-                self.log(f"Aucun {token.symbol} à vendre")
+                self.log(f"No {token.symbol} balance to sell")
                 return False
 
             amount_to_sell = int(token_balance * ratio)
@@ -560,17 +560,17 @@ Chart     : https://dexscreener.com/solana/{token.address}
             result = await jupiter.execute_swap(signed_tx, request_id=order.get("requestId"))
             if result and result.get("status", "").lower() == "success":
                 pct = int(ratio * 100)
-                self.log(f"✅ SELL {pct}% {token.symbol} confirmé")
+                self.log(f"✅ SELL {pct}% {token.symbol} confirmed")
                 return True
         except Exception as e:
-            self.log(f"Erreur SELL: {e}")
+            self.log(f"SELL error: {e}")
         return False
 
     # ------------------------------------------------------------------
     async def _get_meme_price(self, token_address: str) -> float | None:
         try:
-            # connect=3s : inclut le DNS lookup — évite que les dropouts DNS
-            # dilatent le monitoring loop à 10-20s par itération au lieu de 5s
+            # connect=3s: includes DNS lookup — prevents DNS dropouts from
+            # stretching the monitoring loop to 10-20s per iteration instead of 5s
             timeout = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.get(
@@ -590,20 +590,20 @@ Chart     : https://dexscreener.com/solana/{token.address}
     async def _sell_with_retry(self, token: MemeCoin, ratio: float = 1.0,
                                 max_attempts: int = 5) -> bool:
         """
-        Vente avec 5 tentatives et backoff exponentiel.
-        Backoff [5, 10, 20, 30s] entre tentatives — couvre les 429 Alchemy
-        (rate limit ~30s) et les coupures DNS/réseau brèves.
+        Sell with 5 attempts and exponential backoff.
+        Backoff [5, 10, 20, 30s] between attempts — covers Alchemy 429s
+        (~30s rate limit) and brief DNS/network outages.
 
-        Hard deadline de 90s par tentative via asyncio.wait_for :
-        - get_token_balance :  ~3s (connect timeout)
-        - get_quote Jupiter  : ~12s (1–2 essais)
-        - execute_swap       : ~60s (1 essai → tx landing Solana)
-        → 90s = assez pour 1 tentative complète sans geler des heures si DNS down.
+        Hard 90s deadline per attempt via asyncio.wait_for:
+        - get_token_balance: ~3s (connect timeout)
+        - jupiter get_quote: ~12s (1-2 tries)
+        - execute_swap:      ~60s (1 try → Solana tx landing)
+        → 90s = enough for one full attempt without freezing for hours if DNS down.
 
-        Cap +421% : sell raté avec Alchemy 429 après 3 tentatives à 3s.
-        5 tentatives + 30s dernier délai = 2 min max avant abandon.
+        Cap +421%: sell failed with Alchemy 429 after 3 attempts at 3s each.
+        5 attempts + 30s final delay = max 2 min before giving up.
         """
-        # Délais entre tentatives : 5s, 10s, 20s, 30s (couvre le cooldown 429 Alchemy)
+        # Delays between attempts: 5s, 10s, 20s, 30s (covers Alchemy 429 cooldown)
         retry_delays = [5, 10, 20, 30]
         for attempt in range(1, max_attempts + 1):
             try:
@@ -614,7 +614,7 @@ Chart     : https://dexscreener.com/solana/{token.address}
             except asyncio.TimeoutError:
                 self.log(
                     f"  ⚠️ SELL {token.symbol} timeout 90s "
-                    f"(tentative {attempt}/{max_attempts}) — vérif wallet conseillée"
+                    f"(attempt {attempt}/{max_attempts}) — wallet check advised"
                 )
                 ok = False
             if ok:
@@ -622,13 +622,13 @@ Chart     : https://dexscreener.com/solana/{token.address}
             if attempt < max_attempts:
                 delay = retry_delays[min(attempt - 1, len(retry_delays) - 1)]
                 self.log(
-                    f"  ⚠️ SELL {token.symbol} échec "
-                    f"(tentative {attempt}/{max_attempts}) — retry dans {delay}s"
+                    f"  ⚠️ SELL {token.symbol} failed "
+                    f"(attempt {attempt}/{max_attempts}) — retry in {delay}s"
                 )
                 await asyncio.sleep(delay)
         self.log(
-            f"  🚨 SELL {token.symbol} IMPOSSIBLE après {max_attempts} tentatives "
-            f"— vérifie le wallet MANUELLEMENT (tokens peut-être encore présents)"
+            f"  🚨 SELL {token.symbol} IMPOSSIBLE after {max_attempts} attempts "
+            f"— CHECK YOUR WALLET MANUALLY (tokens may still be present)"
         )
         return False
 
@@ -636,11 +636,11 @@ Chart     : https://dexscreener.com/solana/{token.address}
     async def monitor_and_sell(self, token: MemeCoin, entry_price: float,
                                moon_mode: bool = False):
         """
-        Stratégie normale  : sortie partielle +20% → trailing -5% → TP +40% → SL -15%
-        Mode MOON (copy trade) : pas de sortie partielle, pas de TP fixe,
-                                  trailing -8% uniquement → ride le mega pump
+        Normal strategy : partial exit +20% → trailing -5% → TP +40% → SL -15%
+        MOON strategy (copy trade): no partial exit, no fixed TP,
+                                     trailing -8% only → ride the mega pump
         """
-        # Paramètres selon le mode
+        # Mode-specific parameters
         trailing_dist = MOON_TRAILING_DISTANCE if moon_mode else TRAILING_DISTANCE_PCT
         tp_price      = float('inf') if moon_mode else entry_price * (1 + MEME_TAKE_PROFIT_PCT)
         sl_price      = entry_price * (1 - MEME_STOP_LOSS_PCT)
@@ -657,7 +657,7 @@ Chart     : https://dexscreener.com/solana/{token.address}
             self.log(
                 f"Monitor {token.symbol} [{mode_tag}] | Entry ${entry_price:.8f} "
                 f"| Trailing -{MOON_TRAILING_DISTANCE*100:.0f}% | SL ${sl_price:.8f} "
-                f"| Pas de TP fixe — ride jusqu'au trailing"
+                f"| No fixed TP — ride until trailing"
             )
         else:
             self.log(
@@ -668,94 +668,94 @@ Chart     : https://dexscreener.com/solana/{token.address}
 
         last_check = time.time()
         consecutive_fails = 0
-        last_known_price: float | None = None  # dernier prix confirmé (persiste entre itérations)
-        last_price_ts: float = time.time()     # timestamp du dernier prix réussi
-        timeout_log_ts: float = 0              # anti-spam log timeout
-        blind_log_ts: float = 0               # anti-spam log "prix indisponible"
+        last_known_price: float | None = None  # last confirmed price (persists across iterations)
+        last_price_ts: float = time.time()     # timestamp of last successful price
+        timeout_log_ts: float = 0              # anti-spam timeout log
+        blind_log_ts: float = 0                # anti-spam "price unavailable" log
 
         while True:
-            # ── Timeout : désactivé si trailing actif ET position profitable ──
-            # Cas SAM : coupé à +21.6% alors que trailing SL gérait la sortie.
-            # Si trailing_active=True et prix > entry, on laisse le trailing décider.
+            # ── Timeout: disabled if trailing active AND position profitable ──
+            # SAM case: cut at +21.6% while trailing SL was managing exit.
+            # If trailing_active=True and price > entry, let the trailing decide.
             elapsed_total = time.time() - start_time
             if elapsed_total >= MEME_TIMEOUT_SECONDS:
                 in_profit = last_known_price is not None and last_known_price > entry_price
                 if trailing_active and in_profit:
-                    if time.time() - timeout_log_ts > 60:  # log 1×/min max
+                    if time.time() - timeout_log_ts > 60:  # log 1x/min max
                         pnl_now = ((last_known_price - entry_price) / entry_price) * 100
                         self.log(
                             f"  ⏱️ {token.symbol} {int(elapsed_total / 60)}min "
-                            f"— trailing actif à {pnl_now:+.1f}% — ride jusqu'au trailing stop"
+                            f"— trailing active at {pnl_now:+.1f}% — riding until trailing stop"
                         )
                         timeout_log_ts = time.time()
                 else:
-                    break  # timeout réel → sortie ci-dessous
+                    break  # real timeout → exit below
 
             try:
                 current_price = await self._get_meme_price(token.address)
                 if not current_price:
                     consecutive_fails += 1
                     blind_secs = int(time.time() - last_price_ts)
-                    # Log toutes les 15s pour signaler le problème sans spammer
+                    # Log every 15s to surface the problem without spamming
                     if time.time() - blind_log_ts > 15:
-                        self.log(f"  ⚠️ {token.symbol}: prix indisponible depuis {blind_secs}s")
+                        self.log(f"  ⚠️ {token.symbol}: price unavailable for {blind_secs}s")
                         blind_log_ts = time.time()
-                    # Vente forcée si aveugle > 90s — YENJI : 15min sans prix → SL ignoré → -20.7%
+                    # Force sell if blind > 90s — YENJI: 15min without price → SL ignored → -20.7%
                     if blind_secs >= 90:
                         self.log(
-                            f"  🚨 VENTE URGENCE {token.symbol} — prix indisponible {blind_secs}s"
-                            f" (on ne peut pas gérer le SL sans prix)"
+                            f"  🚨 EMERGENCY SELL {token.symbol} — price unavailable {blind_secs}s"
+                            f" (can't manage SL without price)"
                         )
                         ok = await self._sell_with_retry(token, ratio=1.0)
-                        return None  # incertain : on ne sait pas si en gain ou perte
+                        return None  # uncertain: we don't know if we're in profit or loss
                     await asyncio.sleep(5)
                     continue
                 consecutive_fails = 0
-                last_known_price = current_price  # mémorise pour le check timeout
-                last_price_ts = time.time()       # timestamp du dernier prix réussi
+                last_known_price = current_price  # cache for timeout check
+                last_price_ts = time.time()       # timestamp of last successful price
 
                 elapsed  = int(time.time() - start_time)
                 pnl_pct  = ((current_price - entry_price) / entry_price) * 100
 
-                # ── Mise à jour du pic ────────────────────────────────────
+                # ── Peak update ──────────────────────────────────────────
                 if current_price > peak_price:
                     peak_price = current_price
                     if trailing_active:
                         trailing_sl = peak_price * (1 - trailing_dist)
 
-                # ── Trailing progressif (MOON / NEW LISTING uniquement) ──────
-                # Après mise à jour du pic pour que le log affiche la bonne valeur.
-                # Le SL ne recule jamais (new_sl > trailing_sl toujours vérifié).
+                # ── Progressive trailing (MOON / NEW LISTING only) ───────
+                # Done after peak update so the log shows the correct value.
+                # SL never moves backwards (new_sl > trailing_sl always checked).
                 if moon_mode and trailing_active:
                     if pnl_pct >= 50:
-                        new_dist = 0.05   # -5% : sécurisation maximale au-delà de +50%
+                        new_dist = 0.05   # -5%: max securing past +50%
                     elif pnl_pct >= 25:
-                        new_dist = 0.06   # -6% : resserrement à partir de +25%
+                        new_dist = 0.06   # -6%: tightening from +25%
                     else:
-                        new_dist = MOON_TRAILING_DISTANCE  # -8% : zone normale < +25%
-                    if new_dist < trailing_dist:  # on ne desserre jamais
+                        new_dist = MOON_TRAILING_DISTANCE  # -8%: normal zone < +25%
+                    if new_dist < trailing_dist:  # never loosen
                         trailing_dist = new_dist
                         new_sl = peak_price * (1 - trailing_dist)
                         if new_sl > trailing_sl:
                             trailing_sl = new_sl
                             self.log(
-                                f"  🔒 Trailing resserré → -{trailing_dist*100:.0f}% "
+                                f"  🔒 Trailing tightened → -{trailing_dist*100:.0f}% "
                                 f"| SL: ${trailing_sl:.8f} (PnL {pnl_pct:+.1f}%)"
                             )
 
-                # ── SORTIE PARTIELLE +20% (mode NORMAL uniquement) ───────
+                # ── PARTIAL EXIT +20% (NORMAL mode only) ─────────────────
                 if not moon_mode and not partial_sold and current_price >= partial_px:
-                    self.log(f"  💰 SORTIE PARTIELLE {token.symbol} +{pnl_pct:.1f}% — vente 50%")
+                    self.log(f"  💰 PARTIAL EXIT {token.symbol} +{pnl_pct:.1f}% — selling 50%")
                     await self._sell_with_retry(token, ratio=PARTIAL_SELL_RATIO)
                     partial_sold = True
-                    self.log(f"  ✅ 50% sécurisé | Reste en ride avec trailing stop")
+                    self.log(f"  ✅ 50% secured | remaining rides with trailing stop")
 
-                # ── ACTIVATION TRAILING ──────────────────────────────────
+                # ── TRAILING ACTIVATION ──────────────────────────────────
                 if not trailing_active and pnl_pct >= TRAILING_ACTIVATE_PCT * 100:
                     trailing_active = True
                     trailing_sl = peak_price * (1 - trailing_dist)
                     trail_tag = f"-{trailing_dist*100:.0f}%"
-                    self.log(f"  🔒 Trailing stop activé [{trail_tag}] | SL: ${trailing_sl:.8f}")
+                    self.log(f"  🔒 Trailing stop activated [{trail_tag}] | SL: ${trailing_sl:.8f}")
 
                 trail_info = f" | Trail SL ${trailing_sl:.8f}" if trailing_active else ""
                 partial_info = " [50% secured]" if partial_sold else ""
@@ -764,51 +764,51 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     f" | {elapsed}s{partial_info}{trail_info}"
                 )
 
-                # ── TP FINAL ─────────────────────────────────────────────
+                # ── FINAL TP ─────────────────────────────────────────────
                 if current_price >= tp_price:
                     remaining = 1.0
-                    self.log(f"  🎯 TP ATTEINT {token.symbol} +{pnl_pct:.1f}%")
+                    self.log(f"  🎯 TP HIT {token.symbol} +{pnl_pct:.1f}%")
                     sold = await self._sell_with_retry(token, ratio=remaining)
-                    return True if sold else None  # None = sell raté, position incertaine
+                    return True if sold else None  # None = sell failed, position uncertain
 
-                # ── TRAILING STOP ─────────────────────────────────────────
+                # ── TRAILING STOP ────────────────────────────────────────
                 if trailing_active and current_price <= trailing_sl:
                     peak_pnl = ((peak_price - entry_price) / entry_price) * 100
                     outcome_tag = "✅" if current_price > entry_price else "💀 GAP-RUG"
                     self.log(
                         f"  🔒 TRAILING STOP {token.symbol} {outcome_tag} | "
-                        f"Peak +{peak_pnl:.1f}% → sorti à {pnl_pct:+.1f}%"
+                        f"Peak +{peak_pnl:.1f}% → exited at {pnl_pct:+.1f}%"
                     )
                     remaining = 1.0
                     sold = await self._sell_with_retry(token, ratio=remaining)
                     if not sold:
-                        return None  # sell raté, position incertaine
+                        return None  # sell failed, position uncertain
                     return current_price > entry_price or partial_sold
 
-                # ── STOP LOSS ─────────────────────────────────────────────
+                # ── STOP LOSS ────────────────────────────────────────────
                 if current_price <= sl_price:
-                    self.log(f"  🛑 SL TOUCHÉ {token.symbol} {pnl_pct:.1f}%")
+                    self.log(f"  🛑 SL HIT {token.symbol} {pnl_pct:.1f}%")
                     remaining = 1.0
                     sold = await self._sell_with_retry(token, ratio=remaining)
                     if not sold:
-                        return None  # sell raté, position incertaine
+                        return None  # sell failed, position uncertain
                     return partial_sold
 
             except Exception as e:
-                self.log(f"  Erreur monitoring: {e}")
+                self.log(f"  monitoring error: {e}")
 
             await asyncio.sleep(5)
 
-        # Timeout — fermeture forcée (trailing inactif ou position négative)
+        # Timeout — forced close (trailing inactive or position negative)
         elapsed_min = int((time.time() - start_time) / 60)
-        self.log(f"  ⏱️ TIMEOUT {token.symbol} ({elapsed_min}min) — fermeture")
+        self.log(f"  ⏱️ TIMEOUT {token.symbol} ({elapsed_min}min) — closing")
         remaining = 1.0 - PARTIAL_SELL_RATIO if partial_sold else 1.0
         sold = await self._sell_with_retry(token, ratio=remaining)
         if not sold:
-            # Sell impossible (DNS/réseau) — position incertaine
-            # Les tokens sont peut-être encore dans le wallet
+            # Sell impossible (DNS/network) — position uncertain
+            # Tokens may still be in the wallet
             return None
-        # WIN si on sort en profit malgré le timeout
+        # WIN if we exit in profit despite the timeout
         if last_known_price and last_known_price > entry_price:
             return True
         return partial_sold or None
@@ -816,18 +816,18 @@ Chart     : https://dexscreener.com/solana/{token.address}
     # ------------------------------------------------------------------
     async def _wallet_poll_loop(self):
         """
-        Scan les wallets alpha toutes les 15s — découplé du scan principal (30s).
+        Scan alpha wallets every 15s — decoupled from main scan (30s).
 
-        POURQUOI : avec le scan principal à 30s, on détecte l'achat du whale avec
-        un délai moyen de 30-90s. Pendant ce temps le token peut déjà être +30-50%.
-        En scannant les wallets séparément toutes les 15s, on réduit le délai à ~15s.
+        WHY: with the main scan at 30s, we detect whale buys with a 30-90s
+        average delay. During that window the token may already be +30-50%.
+        Scanning wallets separately every 15s reduces detection delay to ~15s.
 
-        Les résultats sont poussés dans scanner.pending_copy via add_copy_signal().
-        Le scan principal lit pending_copy et résout via DexScreener — pas de double appel.
+        Results are pushed into scanner.pending_copy via add_copy_signal().
+        The main scan reads pending_copy and resolves via DexScreener — no double call.
         """
         if not self.wallet_tracker or not self.wallet_tracker.ALPHA_WALLETS:
             return
-        self.log("⚡ Wallet poll loop démarrée — détection copy trade toutes les 15s")
+        self.log("⚡ Wallet poll loop started — copy trade detection every 15s")
         while self.running:
             try:
                 token_wallets = await self.wallet_tracker.scan_all(since_minutes=2)
@@ -835,16 +835,16 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     for w in wallet_list:
                         self.scanner.add_copy_signal(token_addr, w)
             except Exception:
-                pass  # DNS/réseau — réessai au prochain cycle
+                pass  # DNS/network — retry next cycle
             await asyncio.sleep(15)
 
     # ------------------------------------------------------------------
     async def run(self, scan_interval: int = 60):
         self.running = True
 
-        # ── Retry init jusqu'à ce que le réseau soit disponible ──────────────
-        # [Errno 8] nodename nor servname = DNS dropout → le bot ne doit pas crasher,
-        # il doit attendre le retour du réseau et reprendre automatiquement.
+        # ── Retry init until the network is available ─────────────────────
+        # [Errno 8] nodename nor servname = DNS dropout → the bot must not crash,
+        # it must wait for the network to come back and resume automatically.
         retry = 0
         while True:
             try:
@@ -852,32 +852,32 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 break
             except Exception as e:
                 retry += 1
-                wait = min(30 * retry, 300)   # 30s → 60s → 90s → … max 5min
+                wait = min(30 * retry, 300)   # 30s → 60s → 90s → ... max 5min
                 err_short = str(e)[:80] or type(e).__name__
                 self.log(
-                    f"⚠️  Réseau indisponible (tentative {retry}) — "
-                    f"retry dans {wait}s | {err_short}"
+                    f"⚠️  Network unavailable (attempt {retry}) — "
+                    f"retry in {wait}s | {err_short}"
                 )
                 await asyncio.sleep(wait)
 
         self.log("=" * 58)
-        self.log("MEME TRADER ACTIF — STRATÉGIE MAXIMISATION CAPITAL")
-        self.log(f"Entrée: pump 1h +{ENTRY_PUMP_1H_MIN}% → +{ENTRY_PUMP_1H_MAX}%")
-        self.log(f"Rugcheck activé | Max {MAX_CONCURRENT_TRADES} trades simultanés")
+        self.log("MEME TRADER ACTIVE — CAPITAL MAXIMIZATION STRATEGY")
+        self.log(f"Entry: 1h pump +{ENTRY_PUMP_1H_MIN}% → +{ENTRY_PUMP_1H_MAX}%")
+        self.log(f"Rugcheck enabled | Max {MAX_CONCURRENT_TRADES} simultaneous trades")
         n_wallets = len(self.wallet_tracker.ALPHA_WALLETS)
         if n_wallets > 0:
-            self.log(f"🔁 Copy trading: {n_wallets} wallet(s) alpha | poll toutes les 15s")
+            self.log(f"🔁 Copy trading: {n_wallets} alpha wallet(s) | poll every 15s")
             for w in self.wallet_tracker.ALPHA_WALLETS:
                 self.log(f"   → {w[:8]}...{w[-4:]}")
-            # Lancer le wallet poll en background (15s — plus réactif que le scan 30s)
+            # Launch wallet poll in background (15s — more reactive than 30s scan)
             asyncio.create_task(self._wallet_poll_loop())
         else:
-            self.log("🔁 Copy trading: INACTIF (ajoute des wallets dans wallet_tracker.py)")
+            self.log("🔁 Copy trading: INACTIVE (add wallets in wallet_tracker.py)")
         self.log("=" * 58)
 
         while self.running:
             try:
-                # Nettoyer le skip_cache des entrées expirées
+                # Clean expired entries from skip_cache
                 now = time.time()
                 self.skip_cache = {a: v for a, v in self.skip_cache.items() if v[0] > now}
 
@@ -886,8 +886,8 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     await asyncio.sleep(scan_interval)
                     continue
 
-                # Séparer par mode — priorité : new_listing > copy_trade > normal
-                # new_listing + copy_trade bypass filter_tokens (critères propres dans validate_entry)
+                # Split by mode — priority: new_listing > copy_trade > normal
+                # new_listing + copy_trade bypass filter_tokens (own criteria in validate_entry)
                 new_listing_tokens = [
                     t for t in all_tokens
                     if getattr(t, 'new_listing', False) and not getattr(t, 'copy_trade', False)
@@ -904,11 +904,11 @@ Chart     : https://dexscreener.com/solana/{token.address}
                                     if t.address and t.price_usd > 0]
                 normal_opps      = self.scanner.filter_tokens(normal_tokens)
 
-                # Nouvelles listings en tête — la fenêtre de 20min ferme vite
+                # New listings first — the 20min window closes fast
                 opportunities = new_listing_opps + copy_opps + normal_opps
 
                 for token, score in opportunities[:10]:
-                    # Skip cache : si rejeté récemment, ignorer silencieusement
+                    # Skip cache: if recently rejected, ignore silently
                     cached = self.skip_cache.get(token.address)
                     if cached and time.time() < cached[0]:
                         continue
@@ -917,7 +917,7 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     if not validation["ok"]:
                         reason = validation['reason']
                         self.log(f"Skip {token.symbol}: {reason}")
-                        # Mettre en cache pour éviter de réévaluer trop vite
+                        # Cache to avoid re-evaluating too soon
                         ttl = self._skip_ttl(reason)
                         if ttl > 0:
                             self.skip_cache[token.address] = (time.time() + ttl, reason)
@@ -928,9 +928,9 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     entry_price = token.price_usd
                     bought = await self.execute_buy(token)
                     if not bought:
-                        self.log(f"Achat {token.symbol} échoué")
-                        # Cooldown 5 min pour éviter de re-rentrer sur un token en dump
-                        # (ex: slippage exceeded pendant un pump → retry après retournement)
+                        self.log(f"Buy {token.symbol} failed")
+                        # 5 min cooldown to avoid re-entering on a dumping token
+                        # (e.g. slippage exceeded during a pump → retry after reversal)
                         self.trade_cooldowns[token.address] = time.time() + 300
                         continue
 
@@ -940,8 +940,8 @@ Chart     : https://dexscreener.com/solana/{token.address}
                         "entry_time": time.time(),
                     }
 
-                    # new_listing et copy_trade utilisent tous les deux le comportement MOON
-                    # (trailing -8%, pas de sortie partielle, pas de TP fixe)
+                    # Both new_listing and copy_trade use MOON behavior
+                    # (trailing -8%, no partial exit, no fixed TP)
                     moon = getattr(token, 'copy_trade', False) or getattr(token, 'new_listing', False)
                     asyncio.create_task(self._handle_trade(token, entry_price, moon_mode=moon))
                     await asyncio.sleep(5)
@@ -952,9 +952,9 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 err_msg = str(e)
                 if "nodename nor servname" in err_msg or "Name or service not known" in err_msg \
                         or "ConnectError" in type(e).__name__:
-                    self.log(f"⚠️  DNS/Réseau indisponible — retry dans {scan_interval}s")
+                    self.log(f"⚠️  DNS/network unavailable — retry in {scan_interval}s")
                 else:
-                    self.log(f"Erreur boucle [{type(e).__name__}]: {e}")
+                    self.log(f"Loop error [{type(e).__name__}]: {e}")
 
             await asyncio.sleep(scan_interval)
 
@@ -967,34 +967,40 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 self.log(f"✅ WIN {token.symbol} | {self.wins}W/{self.losses}L")
             elif result is False:
                 self.losses += 1
-                # Blacklist 24h — évite de re-rentrer sur un token en distribution
+                # 24h blacklist — avoid re-entering on a token in distribution
                 self.sl_blacklist[token.address] = time.time() + SL_BLACKLIST_HOURS * 3600
                 self.log(f"❌ LOSS {token.symbol} → blacklist {SL_BLACKLIST_HOURS}h | {self.wins}W/{self.losses}L")
             else:
-                # None = sell raté (réseau/DNS) OU timeout neutre
-                # Les tokens peuvent encore être dans le wallet → avertissement critique
+                # None = sell failed (network/DNS) OR neutral timeout
+                # Tokens may still be in the wallet → critical warning
                 self.log(
-                    f"⚠️ SELL INCERTAIN {token.symbol} — "
-                    f"vérifie le wallet, tokens peut-être non vendus | {self.wins}W/{self.losses}L"
+                    f"⚠️ SELL UNCERTAIN {token.symbol} — "
+                    f"check wallet, tokens may be unsold | {self.wins}W/{self.losses}L"
                 )
         finally:
             self.active_trades.pop(token.address, None)
             self.trade_cooldowns[token.address] = time.time() + TRADE_COOLDOWN_SECONDS
 
     def _skip_ttl(self, reason: str) -> int:
-        """Durée de mise en cache silencieuse selon raison de rejet."""
-        if "Pump 6h trop élevé" in reason:  return 1800  # 30 min — ça ne baisse pas vite
-        if "Token trop vieux"   in reason:  return 3600  # 1h   — irréversible
-        if "RUG RISK"           in reason:  return 1800  # 30 min — le score rug ne change pas
-        if "RED FLAG"           in reason:  return 3600  # 1h   — red flag permanent
-        if "RUG CRITIQUE"       in reason:  return 3600  # 1h   — rug permanent
-        if "Déjà trop pompé"    in reason:  return 1200  # 20 min
-        if "Pump épuisé"        in reason:  return 1200  # 20 min
-        if "Trop de sells"      in reason:  return 600   # 10 min
-        if "Sell pressure"      in reason:  return 300   # 5 min — peut s'inverser vite
-        if "Liquidité trop faible" in reason: return 300 # 5 min — peut changer vite
-        if "[NEW]"              in reason:  return 120   # 2 min — nouvelle listing évolue vite
-        return 0  # autres raisons (cooldown, max trades, etc.) → pas de cache
+        """Silent caching duration based on rejection reason."""
+        if "6h pump too high"        in reason: return 1800  # 30 min — won't drop fast
+        if "Token too old"           in reason: return 3600  # 1h    — irreversible
+        if "RUG RISK"                in reason: return 1800  # 30 min — rug score doesn't change
+        if "RED FLAG"                in reason: return 3600  # 1h    — red flag permanent
+        if "RUG CRITICAL"            in reason: return 3600  # 1h    — rug permanent
+        if "Already too pumped"      in reason: return 1200  # 20 min
+        if "Pump exhausted"          in reason: return 1200  # 20 min
+        if "Too many sells"          in reason: return 600   # 10 min
+        if "Sell pressure"           in reason: return 300   # 5 min — can flip fast
+        if "Liquidity too low"       in reason: return 300   # 5 min — can change fast
+        if "Low liquidity"           in reason: return 300   # 5 min — can change fast
+        if "[NEW]"                   in reason: return 120   # 2 min — new listing evolves fast
+        if "Downtrend 1h"            in reason: return 600   # 10 min
+        if "Active dump"             in reason: return 300   # 5 min
+        if "Late entry"              in reason: return 300   # 5 min
+        if "Pump already done"       in reason: return 1800  # 30 min
+        if "Auto blacklist"          in reason: return 3600  # 1h — re-check after expiry
+        return 0  # other reasons (cooldown, max trades, etc.) → no cache
 
     def stop(self):
         self.running = False
