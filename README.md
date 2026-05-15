@@ -124,4 +124,4 @@ MIT for OSS version. Premium version is single-user license — see `PREMIUM_LIC
 
 ---
 
-**Built by [@mouradchahid](https://twitter.com/0xMchd) — 10+ years UX/Growth, lost $300 trading Solana memes to learn what works. Now sharing the receipts.**
+**Built by [@0xMchd](https://twitter.com/0xMchd) — 10+ years UX/Growth, lost $300 trading Solana memes to learn what works. Now sharing the receipts.**
