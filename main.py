@@ -12,7 +12,7 @@ def log(msg: str):
 
 
 async def run_meme_scanner():
-    """Lance le scanner de meme coins."""
+    """Launch the memecoin scanner."""
     from meme_scanner import MemeScanner
 
     scanner = MemeScanner()
@@ -20,80 +20,80 @@ async def run_meme_scanner():
         await scanner.run(interval_seconds=60)
     except asyncio.CancelledError:
         scanner.stop()
-        log("Meme scanner arrete")
+        log("Meme scanner stopped")
     except Exception as e:
-        log(f"Erreur meme scanner: {e}")
+        log(f"Meme scanner error: {e}")
 
 
 async def run_meme_trader():
-    """Lance le meme trader automatique avec rug check."""
+    """Launch the auto trader with rug check."""
     from meme_trader import MemeTrader
 
     trader = MemeTrader()
-    trader.paper_mode = False  # ← changer en False pour le live
+    trader.paper_mode = False  # set to True for paper trading
     try:
         await trader.run(scan_interval=60)
     except asyncio.CancelledError:
         trader.stop()
-        log("Meme trader arrete")
+        log("Meme trader stopped")
     except Exception as e:
-        log(f"Erreur meme trader: {e}")
+        log(f"Meme trader error: {e}")
 
 
 async def main():
-    """Point d'entree principal — meme trader uniquement."""
+    """Main entry point — meme trader only."""
     log("=" * 60)
-    log("SOLANA TRADING SYSTEM")
+    log("SOLMOON BOT — SOLANA TRADING SYSTEM")
     log("=" * 60)
-    log("Scalping bot: DESACTIVE (économise le rate limit Alchemy)")
-    log("Copy trading: DESACTIVE (géré par wallet_tracker dans meme trader)")
-    log("Meme trader:  ACTIVE — LIVE | rug check activé | copy trade intégré")
+    log("Scalping bot:  DISABLED (preserves Alchemy rate limit)")
+    log("Copy trading:  DISABLED (handled by wallet_tracker in meme trader)")
+    log("Meme trader:   ACTIVE — LIVE | rug check enabled | copy trade integrated")
     log("=" * 60)
 
-    # Creer les taches
+    # Build task list
     tasks = []
 
-    # Scalping bot et copytrade désactivés :
-    # — tous deux tournaient en paper mode (aucun vrai trade)
-    # — leur [TRACKER] pollingait 18 wallets × 30s → 429 Alchemy en cascade
-    # — ces 429 bloquaient les sells du meme trader (cf. cap +421% SELL INCERTAIN)
-    # — le copy trade est déjà géré par wallet_tracker.py dans le meme trader
+    # Scalping bot and legacy copytrade are disabled:
+    # — both ran in paper mode (no real trades)
+    # — their [TRACKER] polled 18 wallets every 30s → cascading Alchemy 429s
+    # — those 429s blocked meme trader sells (e.g. cap +421% SELL UNCERTAIN incident)
+    # — copy trade is already handled by wallet_tracker.py inside the meme trader
 
-    # Lancer le meme trader (remplace le simple scanner)
+    # Launch the meme trader
     meme_task = asyncio.create_task(run_meme_trader())
     tasks.append(meme_task)
 
-    # Gestion propre de l'arret
+    # Clean shutdown handling
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
 
     def handle_shutdown():
-        log("Signal d'arret recu - fermeture propre...")
+        log("Shutdown signal received — closing cleanly...")
         stop_event.set()
         for task in tasks:
             task.cancel()
 
-    # Enregistrer les handlers de signaux
+    # Register signal handlers
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, handle_shutdown)
         except NotImplementedError:
-            # Windows ne supporte pas add_signal_handler
+            # Windows does not support add_signal_handler
             pass
 
     try:
-        # Attendre que toutes les taches se terminent (ou soient annulees)
+        # Wait for all tasks to complete (or be cancelled)
         done, pending = await asyncio.wait(
             tasks,
             return_when=asyncio.FIRST_EXCEPTION,
         )
 
-        # Verifier les exceptions
+        # Surface any task exceptions
         for task in done:
             if task.exception():
-                log(f"Tache terminee avec erreur: {task.exception()}")
+                log(f"Task terminated with error: {task.exception()}")
 
-        # Annuler les taches restantes
+        # Cancel remaining tasks
         for task in pending:
             task.cancel()
             try:
@@ -102,13 +102,13 @@ async def main():
                 pass
 
     except KeyboardInterrupt:
-        log("Interruption clavier")
+        log("Keyboard interrupt")
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
     log("=" * 60)
-    log("SYSTEME ARRETE")
+    log("SYSTEM STOPPED")
     log("=" * 60)
 
 
@@ -116,5 +116,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log("Arret.")
+        log("Bye.")
         sys.exit(0)

@@ -1,12 +1,12 @@
 """
-Wallet Copy Tracker — suit les wallets alpha Solana et détecte leurs achats.
+Wallet Copy Tracker — follows Solana alpha wallets and detects their buys.
 
-Comment trouver des wallets alpha :
-1. Va sur https://gmgn.ai/sol/address
-2. Filtre : PnL 7j > 200%, trades > 20, win rate > 60%
-3. Copie les adresses des meilleurs wallets ci-dessous
+How to find alpha wallets:
+1. Go to https://gmgn.ai/sol/address
+2. Filter: 7d PnL > 200%, trades > 20, win rate > 60%
+3. Copy the best wallet addresses into the list below
 
-Alternative : https://app.cielo.finance / https://bullx.io (Smart Money section)
+Alternatives: https://app.cielo.finance / https://bullx.io (Smart Money section)
 """
 
 import asyncio
@@ -17,27 +17,27 @@ from datetime import datetime
 
 class WalletTracker:
     """
-    Surveille des wallets alpha Solana.
-    Détecte leurs achats de tokens dans les 2 dernières minutes.
-    Retourne les adresses de tokens pour que le scanner les évalue.
+    Monitor Solana alpha wallets.
+    Detect their token buys within the last N minutes.
+    Returns token addresses for the scanner to evaluate.
     """
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ⚡ AJOUTE ICI LES WALLETS ALPHA (trouvés sur GMGN.ai)
-    # Exemple: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+    # ⚡ ADD YOUR ALPHA WALLETS HERE (find them on GMGN.ai)
+    # Example: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
     # ─────────────────────────────────────────────────────────────────────────
     ALPHA_WALLETS: list[str] = [
-        # ── F5jWYuiD — le plus actif des anciens (achats fréquents)
+        # F5jWYuiD — most active legacy wallet (frequent buys)
         "F5jWYuiDLTiaLYa54D88YbpXgEsA6NKHzWy4SN4bMYjt",
 
-        # ── Confirmés utiles (GMGN.ai)
-        "4zb5WFzzAP6UZUva5iXPEz1JbKTU4Z6TC3sNEzLbpv98",  # meilleur signal (Billy +29%)
+        # Confirmed strong signals (GMGN.ai vetted)
+        "4zb5WFzzAP6UZUva5iXPEz1JbKTU4Z6TC3sNEzLbpv98",  # best signal (Billy +29%)
         "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
         "7xkXams2xqCokfoMyLKUtrKRTXqs9EzyEnkkFVH459YH",
         "CATjstjdDxqxKdrXQ9R8DWF2oZp8jSd2QX2VJ1zQbT91",
         "6bVUHfK6YzdhLEysxb9VHwsNdDvMcYhk1FfSjZ9onvZx",
 
-        # ── Ajoutés le 2026-04-27
+        # Added 2026-04-27
         "8MoW9mtbEz6z3gPuAdYb1yWhjCAxQSYqpcTb1CQgN5qb",
         "Ew6qBU7N34gRNgpgUwhJ3PgrtbPYpLYWLBEG5yuQTceD",
         "7pDhG6NqfzQzw5KvtGXJbVRUh4iTBgYAn68BSKjdMNC1",
@@ -45,12 +45,12 @@ class WalletTracker:
         "uveKTCxihqgL2E9X6CYBDQoQko69QjtwE4d6FkBFcy1",
         "CVtN7xVV3ed5x6kJfyKL1b57NeLe8BXKoAWzC29D3G8Q",
 
-        # Retiré : 4vw54BmA — pump.fun micro-caps à $0 liq, pending_copy expire toujours
+        # Removed: 4vw54BmA — pump.fun micro-caps with $0 liq, pending_copy always expired
 
-        # ── Ajoutés le 2026-05-01 (GMGN.ai rank 7j, filtres: winrate>60%, trades>30, PnL>100%)
-        "FbiBbTBP2Vs7b3j74eBsAYFpxWms11m23DeGmYcc8Yoo",  # #1 new — PnL +289% / 73% WR / 107tx / $17K
-        "nrzLzxvq1EENDEi5cYp2H8ZscyLKa79yfQ9XWm3zbxt",   # PnL +133% / 60% WR / 34tx — axiom+smart_degen
-        "5d3jQcuUvsuHyZkhdp78FFqc7WogrzZpTtec1X9VNkuE",  # PnL +127% / 55% WR / 37tx — $30K / kol+smart_degen
+        # Added 2026-05-01 (GMGN.ai 7d rank, filters: winrate>60%, trades>30, PnL>100%)
+        "FbiBbTBP2Vs7b3j74eBsAYFpxWms11m23DeGmYcc8Yoo",  # top new — +289% PnL / 73% WR / 107tx / $17K
+        "nrzLzxvq1EENDEi5cYp2H8ZscyLKa79yfQ9XWm3zbxt",   # +133% PnL / 60% WR / 34tx — axiom+smart_degen
+        "5d3jQcuUvsuHyZkhdp78FFqc7WogrzZpTtec1X9VNkuE",  # +127% PnL / 55% WR / 37tx — $30K / kol+smart_degen
     ]
 
     def __init__(self, rpc_url: str):
@@ -78,7 +78,7 @@ class WalletTracker:
 
     # ─────────────────────────────────────────────────────────────────────────
     async def _get_signatures(self, client: httpx.AsyncClient, wallet: str, limit: int = 8) -> list[dict]:
-        """Récupère les dernières signatures de transactions du wallet."""
+        """Fetch the wallet's most recent transaction signatures."""
         result = await self._rpc_call(
             client,
             "getSignaturesForAddress",
@@ -88,7 +88,7 @@ class WalletTracker:
 
     # ─────────────────────────────────────────────────────────────────────────
     async def _get_transaction(self, client: httpx.AsyncClient, signature: str) -> dict | None:
-        """Récupère les détails d'une transaction."""
+        """Fetch full transaction details."""
         result = await self._rpc_call(
             client,
             "getTransaction",
@@ -99,8 +99,8 @@ class WalletTracker:
     # ─────────────────────────────────────────────────────────────────────────
     async def detect_buys(self, wallet: str, since_minutes: int = 2) -> list[str]:
         """
-        Détecte les tokens achetés par le wallet dans les N dernières minutes.
-        Retourne les adresses de tokens (mints).
+        Detect tokens bought by the wallet in the last N minutes.
+        Returns token mint addresses.
         """
         bought_tokens = []
         cutoff = time.time() - (since_minutes * 60)
@@ -113,25 +113,25 @@ class WalletTracker:
                     sig = sig_info.get("signature", "")
                     block_time = sig_info.get("blockTime", 0) or 0
 
-                    # Stop si la tx est plus vieille que la fenêtre
+                    # Stop if the tx is older than the lookback window
                     if block_time < cutoff:
                         break
 
-                    # Skip si déjà vu
+                    # Skip already-seen signatures
                     if sig in self.seen_signatures:
                         continue
                     self.seen_signatures.add(sig)
 
-                    # Récupère la transaction complète
+                    # Fetch full transaction
                     tx = await self._get_transaction(client, sig)
                     if not tx:
                         continue
 
                     meta = tx.get("meta", {})
                     if meta.get("err"):
-                        continue  # transaction échouée
+                        continue  # failed transaction
 
-                    # Compare les balances avant/après pour trouver les tokens reçus
+                    # Compare pre/post balances to detect received tokens
                     pre_balances = meta.get("preTokenBalances", [])
                     post_balances = meta.get("postTokenBalances", [])
 
@@ -148,22 +148,22 @@ class WalletTracker:
                             post_amount = float(b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
                             pre_amount = pre_map.get(mint, 0)
 
-                            # Balance augmentée = token acheté
+                            # Balance increased = token bought
                             if post_amount > pre_amount and post_amount > 0:
                                 bought_tokens.append(mint)
 
         except Exception as e:
-            self.log(f"Erreur scan {wallet[:8]}...: {e}")
+            self.log(f"Scan error {wallet[:8]}...: {e}")
 
         return bought_tokens
 
     # ─────────────────────────────────────────────────────────────────────────
     async def scan_all(self, since_minutes: int = 2) -> dict[str, list[str]]:
         """
-        Scan tous les wallets alpha en parallèle.
-        Retourne un dict {token_address: [wallet1, wallet2, ...]}
-        — permet de savoir combien de wallets ont acheté le même token simultanément.
-        Un token acheté par 2+ wallets = signal beaucoup plus fort.
+        Scan all alpha wallets in parallel.
+        Returns a dict {token_address: [wallet1, wallet2, ...]}
+        — lets us know how many wallets bought the same token simultaneously.
+        A token bought by 2+ wallets is a much stronger signal.
         """
         if not self.ALPHA_WALLETS:
             return {}
@@ -178,36 +178,36 @@ class WalletTracker:
             if isinstance(result, list) and result:
                 wallet_hits += 1
                 wallet_addr = self.ALPHA_WALLETS[i]
-                self.log(f"🔁 {wallet_addr[:8]}... a acheté {len(result)} token(s)")
+                self.log(f"🔁 {wallet_addr[:8]}... bought {len(result)} token(s)")
                 for token in result:
                     if token not in token_wallets:
                         token_wallets[token] = []
                     token_wallets[token].append(wallet_addr)
 
         if token_wallets:
-            self.log(f"🎯 {len(token_wallets)} token(s) copy-trade depuis {wallet_hits} wallet(s)")
-            # Signal fort : plusieurs wallets achètent le même token au même moment
+            self.log(f"🎯 {len(token_wallets)} copy-trade token(s) from {wallet_hits} wallet(s)")
+            # Strong signal: multiple wallets buying the same token at the same time
             for token, wallets in token_wallets.items():
                 if len(wallets) >= 2:
-                    self.log(f"  🔥 {token[:8]}... acheté par {len(wallets)} wallets — signal FORT")
+                    self.log(f"  🔥 {token[:8]}... bought by {len(wallets)} wallets — STRONG signal")
 
         return token_wallets
 
     # ─────────────────────────────────────────────────────────────────────────
     def add_wallet(self, address: str):
-        """Ajoute un wallet alpha dynamiquement."""
+        """Add an alpha wallet at runtime."""
         if address not in self.ALPHA_WALLETS:
             self.ALPHA_WALLETS.append(address)
-            self.log(f"✅ Wallet ajouté: {address[:8]}...")
+            self.log(f"✅ Wallet added: {address[:8]}...")
 
     def remove_wallet(self, address: str):
-        """Retire un wallet."""
+        """Remove a wallet."""
         if address in self.ALPHA_WALLETS:
             self.ALPHA_WALLETS.remove(address)
-            self.log(f"🗑️ Wallet retiré: {address[:8]}...")
+            self.log(f"🗑️ Wallet removed: {address[:8]}...")
 
     def status(self):
-        """Affiche le statut du tracker."""
-        self.log(f"Wallets trackés: {len(self.ALPHA_WALLETS)}")
+        """Print tracker status."""
+        self.log(f"Tracked wallets: {len(self.ALPHA_WALLETS)}")
         for w in self.ALPHA_WALLETS:
             self.log(f"  → {w[:8]}...{w[-4:]}")

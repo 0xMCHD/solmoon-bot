@@ -1,4 +1,4 @@
-"""Gestion du wallet Solana et exécution des transactions."""
+"""Solana wallet management and transaction execution."""
 
 import base58
 import httpx
@@ -9,13 +9,13 @@ import config
 
 
 def load_keypair() -> Keypair:
-    """Charge le keypair depuis la clé privée en .env."""
+    """Load keypair from PRIVATE_KEY in .env."""
     secret = base58.b58decode(config.PRIVATE_KEY)
     return Keypair.from_bytes(secret)
 
 
 async def get_sol_balance(pubkey: str) -> float:
-    """Récupère le solde SOL du wallet."""
+    """Fetch SOL balance for the wallet."""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -31,7 +31,7 @@ async def get_sol_balance(pubkey: str) -> float:
 
 
 def sign_transaction(swap_tx_base64: str, keypair: Keypair) -> str:
-    """Signe la transaction — gère 1 ou 2 signers."""
+    """Sign a transaction — handles 1 or 2 signers."""
     import base64
 
     tx_bytes = base64.b64decode(swap_tx_base64)
@@ -43,14 +43,14 @@ def sign_transaction(swap_tx_base64: str, keypair: Keypair) -> str:
     signer_keys = list(msg.account_keys[:num_signers])
 
     print(f"  [SIGN] Wallet: {pubkey}")
-    print(f"  [SIGN] Signers requis: {num_signers}, keys: {[str(k)[:8] + '...' for k in signer_keys]}")
+    print(f"  [SIGN] Required signers: {num_signers}, keys: {[str(k)[:8] + '...' for k in signer_keys]}")
 
-    # Cas simple : 1 seul signer (nous)
+    # Simple case: single signer (us)
     if num_signers == 1 and signer_keys[0] == pubkey:
         signed_tx = VersionedTransaction(msg, [keypair])
         return base64.b64encode(bytes(signed_tx)).decode("utf-8")
 
-    # Cas 2+ signers : signer notre slot, laisser les autres vides
+    # 2+ signers case: sign our slot, leave others empty (Jupiter fills via /execute)
     msg_bytes = bytes(msg)
     our_sig = keypair.sign_message(msg_bytes)
 
@@ -61,12 +61,12 @@ def sign_transaction(swap_tx_base64: str, keypair: Keypair) -> str:
             break
 
     if our_index is None:
-        raise ValueError("Notre wallet n'est pas dans les signers de la transaction")
+        raise ValueError("Our wallet is not among the transaction signers")
 
-    # Reconstruire les bytes manuellement
+    # Rebuild bytes manually
     sig_bytes = bytearray()
 
-    # Compact-u16 pour le nombre de signatures
+    # Compact-u16 encoding for number of signatures
     if num_signers < 128:
         sig_bytes.append(num_signers)
     else:
@@ -77,18 +77,18 @@ def sign_transaction(swap_tx_base64: str, keypair: Keypair) -> str:
         if i == our_index:
             sig_bytes.extend(bytes(our_sig))
         else:
-            # Slot vide (zéros) — Jupiter le remplira via /execute
+            # Empty slot (zeros) — Jupiter will fill via /execute
             sig_bytes.extend(b'\x00' * 64)
 
-    # Ajouter le message
+    # Append the message
     result = bytes(sig_bytes) + msg_bytes
 
-    print(f"  [SIGN] Signature ajoutée à l'index {our_index}")
+    print(f"  [SIGN] Signature added at index {our_index}")
     return base64.b64encode(result).decode("utf-8")
 
 
 async def get_token_balance(pubkey: str, mint: str) -> int:
-    """Récupère le solde réel d'un token SPL (en unités brutes)."""
+    """Fetch the actual SPL token balance (raw units)."""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -99,9 +99,9 @@ async def get_token_balance(pubkey: str, mint: str) -> int:
             {"encoding": "jsonParsed"},
         ],
     }
-    # connect=3s couvre la résolution DNS + TCP handshake.
-    # Sans ce timeout granulaire, un dropout DNS peut geler cette coroutine
-    # indéfiniment même avec timeout=10, bloquant _sell_with_retry pendant des minutes.
+    # connect=3s covers DNS resolution + TCP handshake.
+    # Without this granular timeout, a DNS dropout can freeze this coroutine
+    # indefinitely even with timeout=10, blocking _sell_with_retry for minutes.
     _timeout = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=10.0)
     async with httpx.AsyncClient(timeout=_timeout) as client:
         resp = await client.post(config.RPC_URL, json=payload)
@@ -118,17 +118,17 @@ async def get_token_balance(pubkey: str, mint: str) -> int:
 
 
 async def send_transaction(swap_tx_base64: str, keypair: Keypair) -> str | None:
-    """Signe et envoie une transaction de swap."""
+    """Sign and send a swap transaction."""
     import base64
 
-    # Désérialiser la transaction
+    # Deserialize the transaction
     tx_bytes = base64.b64decode(swap_tx_base64)
     tx = VersionedTransaction.from_bytes(tx_bytes)
 
-    # Signer
+    # Sign
     tx = VersionedTransaction(tx.message, [keypair])
 
-    # Sérialiser pour envoi
+    # Serialize for sending
     raw_tx = base64.b64encode(bytes(tx)).decode("utf-8")
 
     payload = {
@@ -152,14 +152,14 @@ async def send_transaction(swap_tx_base64: str, keypair: Keypair) -> str | None:
         data = resp.json()
 
     if "error" in data:
-        print(f"  [ERREUR TX] {data['error']}")
+        print(f"  [TX ERROR] {data['error']}")
         return None
 
     return data.get("result")
 
 
 async def confirm_transaction(tx_sig: str, timeout: int = 60) -> bool:
-    """Attend la confirmation d'une transaction."""
+    """Wait for a transaction to be confirmed."""
     import asyncio
 
     payload = {
@@ -180,10 +180,10 @@ async def confirm_transaction(tx_sig: str, timeout: int = 60) -> bool:
             if status.get("confirmationStatus") in ("confirmed", "finalized"):
                 if status.get("err") is None:
                     return True
-                print(f"  [TX ECHOUEE] {status.get('err')}")
+                print(f"  [TX FAILED] {status.get('err')}")
                 return False
 
         await asyncio.sleep(2)
 
-    print("  [TIMEOUT] Transaction non confirmée")
+    print("  [TIMEOUT] Transaction not confirmed")
     return False
