@@ -1,4 +1,4 @@
-"""Scanner de meme coins Solana — détecte les opportunités en temps réel."""
+"""Solana memecoin scanner — detect real-time opportunities."""
 
 import asyncio
 import httpx
@@ -7,21 +7,21 @@ from datetime import datetime
 
 import config
 
-# --- Filtres de sécurité ---
-MIN_LIQUIDITY_USD = 30_000      # liquidité minimum $30K
-MIN_VOLUME_24H_USD = 50_000     # volume 24h minimum $50K
-MIN_PRICE_CHANGE_1H = 5.0       # +5% minimum en 1h
-MAX_PRICE_CHANGE_1H = 200.0     # +200% max (trop tard si +200%)
-MIN_TOKEN_AGE_HOURS = 0.5       # token lancé depuis au moins 30min
-MAX_TOKEN_AGE_HOURS = 48        # pas plus de 48h (on veut l'early)
-MIN_TXNS_1H = 50                # au moins 50 transactions en 1h
-MAX_TOP10_HOLDERS_PCT = 80      # top 10 holders max 80% du supply
+# --- Safety filters ---
+MIN_LIQUIDITY_USD = 30_000      # min $30K liquidity
+MIN_VOLUME_24H_USD = 50_000     # min $50K 24h volume
+MIN_PRICE_CHANGE_1H = 5.0       # min +5% in 1h
+MAX_PRICE_CHANGE_1H = 200.0     # max +200% (too late if higher)
+MIN_TOKEN_AGE_HOURS = 0.5       # at least 30min since launch
+MAX_TOKEN_AGE_HOURS = 48        # at most 48h (we want early)
+MIN_TXNS_1H = 50                # min 50 transactions in 1h
+MAX_TOP10_HOLDERS_PCT = 80      # top 10 holders own <= 80% of supply
 
 DEXSCREENER_API = "https://api.dexscreener.com/token-boosts/top/v1"
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_PAIRS = "https://api.dexscreener.com/latest/dex/pairs/solana"
 
-# Stablecoins et base tokens — jamais tradeable (protection copy-trade DexScreener)
+# Stablecoins and base tokens — never tradeable (DexScreener copy-trade protection)
 BLACKLISTED_TOKEN_ADDRESSES: set[str] = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",   # USDT
@@ -55,36 +55,36 @@ class MemeCoin:
         self.pair_address = data.get("pairAddress", "")
         self.dex_id = data.get("dexId", "")
 
-        # Age du token
+        # Token age
         created_at = data.get("pairCreatedAt", 0) or 0
         self.age_hours = (time.time() - created_at / 1000) / 3600 if created_at else 999
 
-        # Momentum court terme (5 minutes) — clé pour détecter les entrées tardives
+        # Short-term momentum (5 min) — key signal for late entries
         self.price_change_5m = float(data.get("priceChange", {}).get("m5", 0) or 0)
 
-        # Source du signal
-        self.copy_trade: bool   = False   # copy trade whale → mode MOON
-        self.new_listing: bool  = False   # migration pump.fun → Raydium < 20min → mode MOON
+        # Signal source
+        self.copy_trade: bool   = False   # whale copy trade → MOON mode
+        self.new_listing: bool  = False   # pump.fun → Raydium migration < 20min → MOON mode
 
-        # Nombre de wallets alpha ayant acheté ce token (1 = signal normal, 2+ = signal fort)
+        # Number of alpha wallets that bought this token (1 = normal signal, 2+ = strong signal)
         self.wallet_hit_count: int = 0
 
     def score(self) -> dict:
-        """Calcule un score de qualité pour ce token."""
+        """Compute a quality score for this token."""
         points = 0
         flags = []
         warnings = []
 
-        # Volume 1h
+        # 1h volume
         if self.volume_1h > 200_000:
             points += 30
-            flags.append("VOL_FORT")
+            flags.append("VOL_HIGH")
         elif self.volume_1h > 100_000:
             points += 20
         elif self.volume_1h > 50_000:
             points += 10
 
-        # Momentum prix
+        # Price momentum
         if 10 <= self.price_change_1h <= 50:
             points += 25
             flags.append("MOMENTUM")
@@ -92,19 +92,19 @@ class MemeCoin:
             points += 15
         elif self.price_change_1h > 100:
             points -= 10
-            warnings.append("PUMP_EXTREME")
+            warnings.append("EXTREME_PUMP")
 
-        # Liquidité
+        # Liquidity
         if self.liquidity_usd > 100_000:
             points += 20
-            flags.append("LIQUIDE")
+            flags.append("LIQUID")
         elif self.liquidity_usd > 50_000:
             points += 10
         elif self.liquidity_usd < 20_000:
             points -= 20
-            warnings.append("LIQUIDITE_FAIBLE")
+            warnings.append("LOW_LIQUIDITY")
 
-        # Ratio buys/sells (pression acheteuse)
+        # Buys/sells ratio (buy pressure)
         total_txns = self.txns_1h_buys + self.txns_1h_sells
         if total_txns > 0:
             buy_ratio = self.txns_1h_buys / total_txns
@@ -115,25 +115,25 @@ class MemeCoin:
                 points -= 15
                 warnings.append("SELL_PRESSURE")
 
-        # Age optimal
+        # Optimal age
         if 1 <= self.age_hours <= 12:
             points += 10
             flags.append("EARLY")
         elif self.age_hours < 0.5:
             points -= 10
-            warnings.append("TROP_RECENT")
+            warnings.append("TOO_RECENT")
         elif self.age_hours > 48:
             points -= 5
 
-        # Market cap (éviter trop gros ou trop petit)
+        # Market cap (avoid too large or too small)
         if 500_000 <= self.market_cap <= 10_000_000:
             points += 10  # sweet spot
         elif self.market_cap < 100_000:
-            warnings.append("MCAP_MICRO")
+            warnings.append("MICRO_MCAP")
         elif self.market_cap > 50_000_000:
-            warnings.append("MCAP_ELEVE")
+            warnings.append("HIGH_MCAP")
 
-        # Raydium = plus de confiance que pump.fun
+        # Raydium = higher trust than pump.fun
         if self.dex_id == "raydium":
             points += 5
             flags.append("RAYDIUM")
@@ -145,8 +145,8 @@ class MemeCoin:
         }
 
 
-COPY_TRADE_WATCH_TTL      = 300   # 5 min pour qu'un token copy trade apparaisse sur DexScreener
-NEW_LISTING_MAX_AGE_MIN   = 20    # 20 min max pour une "nouvelle listing" Raydium
+COPY_TRADE_WATCH_TTL      = 300   # 5 min for a copy-traded token to appear on DexScreener
+NEW_LISTING_MAX_AGE_MIN   = 20    # 20 min max for a Raydium "new listing"
 PUMPFUN_API               = "https://frontend-api.pump.fun/coins"
 
 
@@ -154,11 +154,11 @@ class MemeScanner:
     def __init__(self, wallet_tracker=None):
         self.running = False
         self.last_alerts: dict[str, float] = {}  # address -> timestamp
-        self.alert_cooldown = 1800  # 30min entre 2 alertes sur le même token
-        self.wallet_tracker = wallet_tracker  # WalletTracker optionnel
-        # File d'attente copy trade — alimentée par le background wallet poll (15s)
-        # Structure : {token_addr: {"ts": float, "wallets": set[str]}}
-        # "wallets" = ensemble des adresses des wallets ayant acheté ce token
+        self.alert_cooldown = 1800  # 30min between 2 alerts on the same token
+        self.wallet_tracker = wallet_tracker  # optional WalletTracker
+        # Copy trade queue — fed by the background wallet poll (15s)
+        # Structure: {token_addr: {"ts": float, "wallets": set[str]}}
+        # "wallets" = set of wallet addresses that bought this token
         self.pending_copy: dict[str, dict] = {}
 
     def log(self, msg: str):
@@ -167,22 +167,22 @@ class MemeScanner:
 
     def add_copy_signal(self, token_addr: str, wallet_addr: str = ""):
         """
-        Enregistre un signal copy trade depuis le background wallet poll.
-        Appelé par MemeTrader._wallet_poll_loop toutes les 15s.
-        Chaque appel peut provenir d'un wallet différent pour le même token —
-        wallet_hit_count reflète ensuite combien de whales ont acheté simultanément.
+        Register a copy-trade signal from the background wallet poll.
+        Called by MemeTrader._wallet_poll_loop every 15s.
+        Each call can originate from a different wallet for the same token —
+        wallet_hit_count then reflects how many whales bought simultaneously.
         """
         if not token_addr or token_addr in BLACKLISTED_TOKEN_ADDRESSES:
             return
         now = time.time()
         if token_addr not in self.pending_copy:
             self.pending_copy[token_addr] = {"ts": now, "wallets": set()}
-            self.log(f"⏳ Copy trade en attente DexScreener: {token_addr[:8]}...")
+            self.log(f"⏳ Copy trade pending DexScreener: {token_addr[:8]}...")
         if wallet_addr:
             self.pending_copy[token_addr]["wallets"].add(wallet_addr)
 
     async def fetch_trending(self) -> list[MemeCoin]:
-        """Récupère les tokens Solana trending sur DexScreener (3 sources)."""
+        """Fetch Solana trending tokens on DexScreener (3 sources)."""
         tokens = []
         seen_addresses = set()
 
@@ -190,8 +190,8 @@ class MemeScanner:
             for pair in pairs_list:
                 if pair.get("chainId") == "solana":
                     mc = MemeCoin(pair)
-                    # Blacklist stablecoins/base tokens — DexScreener retourne les
-                    # 2 tokens d'une paire, ce qui peut inclure USDC, wSOL, etc.
+                    # Blacklist stablecoins/base tokens — DexScreener returns both
+                    # tokens of a pair, which may include USDC, wSOL, etc.
                     if mc.address in BLACKLISTED_TOKEN_ADDRESSES:
                         continue
                     if mc.address not in seen_addresses:
@@ -199,7 +199,7 @@ class MemeScanner:
                         tokens.append(mc)
 
         async with httpx.AsyncClient(timeout=8) as client:
-            # Source 1: Top boosted tokens sur Solana
+            # Source 1: Top boosted Solana tokens
             try:
                 resp = await client.get(
                     "https://api.dexscreener.com/token-boosts/top/v1",
@@ -218,7 +218,7 @@ class MemeScanner:
                             pairs_data = resp2.json()
                             pairs = pairs_data if isinstance(pairs_data, list) else pairs_data.get("pairs", [])
                             await _add_tokens(pairs)
-                        # Batch 2 (adresses 11-20)
+                        # Batch 2 (addresses 11-20)
                         if len(addresses) > 10:
                             addr_str_b = ",".join(addresses[10:20])
                             resp2b = await client.get(
@@ -229,9 +229,9 @@ class MemeScanner:
                                 p2b = pd2b if isinstance(pd2b, list) else pd2b.get("pairs", [])
                                 await _add_tokens(p2b)
             except Exception as e:
-                self.log(f"Erreur fetch trending: {type(e).__name__}: {e}")
+                self.log(f"fetch trending error: {type(e).__name__}: {e}")
 
-            # Source 2: Nouvelles paires (early tokens)
+            # Source 2: New pairs (early tokens)
             try:
                 resp = await client.get(
                     "https://api.dexscreener.com/token-profiles/latest/v1",
@@ -260,9 +260,9 @@ class MemeScanner:
                                 p3b = pd3b if isinstance(pd3b, list) else pd3b.get("pairs", [])
                                 await _add_tokens(p3b)
             except Exception as e:
-                self.log(f"Erreur fetch new pairs: {type(e).__name__}: {e}")
+                self.log(f"fetch new pairs error: {type(e).__name__}: {e}")
 
-            # Source 3: Gainers Solana (tokens qui bougent MAINTENANT)
+            # Source 3: Solana gainers (tokens moving NOW)
             try:
                 resp = await client.get(
                     "https://api.dexscreener.com/token-boosts/latest/v1",
@@ -282,10 +282,10 @@ class MemeScanner:
                             p4 = pd4 if isinstance(pd4, list) else pd4.get("pairs", [])
                             await _add_tokens(p4)
             except Exception as e:
-                self.log(f"Erreur fetch latest boosts: {type(e).__name__}: {e}")
+                self.log(f"fetch latest boosts error: {type(e).__name__}: {e}")
 
-            # Source 3b: Raydium trending < 2h — tokens qui montent MAINTENANT
-            # Les < 20min seront promus new_listing si pump.fun graduation confirmée
+            # Source 3b: Raydium trending < 2h — tokens moving NOW
+            # Tokens < 20min get promoted to new_listing if pump.fun graduation is confirmed
             try:
                 resp = await client.get(
                     "https://api.dexscreener.com/latest/dex/search?q=raydium&rankBy=trendingScoreH1&order=desc",
@@ -304,21 +304,21 @@ class MemeScanner:
                     ]
                     before_3b = len(tokens)
                     await _add_tokens(fresh[:15])
-                    # Promouvoir les très récents (< 20min) en new_listing
+                    # Promote the very recent ones (< 20min) to new_listing
                     for mc in tokens[before_3b:]:
                         if mc.age_hours < NEW_LISTING_MAX_AGE_MIN / 60:
                             mc.new_listing = True
             except Exception as e:
-                self.log(f"Erreur fetch raydium fresh: {type(e).__name__}: {e}")
+                self.log(f"fetch raydium fresh error: {type(e).__name__}: {e}")
 
             # ──────────────────────────────────────────────────────────────
-            # Source 5 : pump.fun → Raydium graduations (< 20 min)
+            # Source 5: pump.fun → Raydium graduations (< 20 min)
             # ──────────────────────────────────────────────────────────────
-            # Quand une bonding curve pump.fun se remplit (~$69K mcap), le token
-            # migre automatiquement sur Raydium avec ~$12K de liquidité.
-            # C'est LE signal le plus explosif : x2-x10 dans les 30 premières minutes.
-            # On récupère les tokens récemment tradés sur pump.fun qui ont un raydium_pool,
-            # puis on confirme via DexScreener que la paire a < 20min.
+            # When a pump.fun bonding curve fills up (~$69K mcap), the token
+            # automatically migrates to Raydium with ~$12K liquidity.
+            # This is THE most explosive signal: 2x-10x in the first 30 minutes.
+            # We pull tokens recently traded on pump.fun that have a raydium_pool,
+            # then confirm via DexScreener that the pair is < 20min old.
             n_new_listing = 0
             try:
                 resp5 = await client.get(
@@ -336,7 +336,7 @@ class MemeScanner:
                 )
                 if resp5.status_code == 200:
                     coins5 = resp5.json()
-                    # Sélectionner les tokens gradués (raydium_pool != null)
+                    # Select graduated tokens (raydium_pool != null)
                     graduated_mints = [
                         c["mint"] for c in coins5
                         if isinstance(c, dict)
@@ -344,7 +344,7 @@ class MemeScanner:
                         and c.get("mint")
                         and c["mint"] not in BLACKLISTED_TOKEN_ADDRESSES
                     ]
-                    # Vérifier via DexScreener que la paire Raydium est < 20min
+                    # Confirm via DexScreener that the Raydium pair is < 20min
                     now_ts = time.time()
                     for i in range(0, min(len(graduated_mints), 30), 10):
                         batch = graduated_mints[i:i+10]
@@ -371,30 +371,30 @@ class MemeScanner:
                                     mc.new_listing = True
                                 n_new_listing += len(tokens) - before5
                         except Exception as eb:
-                            self.log(f"Erreur batch graduation: {type(eb).__name__}: {eb}")
+                            self.log(f"graduation batch error: {type(eb).__name__}: {eb}")
                     if n_new_listing > 0:
-                        self.log(f"🆕 {n_new_listing} migration(s) pump.fun→Raydium détectée(s)")
+                        self.log(f"🆕 {n_new_listing} pump.fun→Raydium migration(s) detected")
             except Exception as e:
-                self.log(f"Erreur fetch pump.fun graduations: {type(e).__name__}: {e}")
+                self.log(f"fetch pump.fun graduations error: {type(e).__name__}: {e}")
 
-        # Source 4: Copy trading — alimenté par background wallet poll (15s, voir MemeTrader)
-        # Le scan des wallets est découplé du scan principal pour une réactivité maximale.
-        # Ici on lit uniquement pending_copy (déjà rempli) et on résout via DexScreener.
+        # Source 4: Copy trading — fed by background wallet poll (15s, see MemeTrader)
+        # Wallet scanning is decoupled from the main scan for maximum reactivity.
+        # Here we only read pending_copy (already populated) and resolve via DexScreener.
         n_copy = 0
         if self.wallet_tracker and self.wallet_tracker.ALPHA_WALLETS:
             try:
                 now = time.time()
 
-                # Expirer les pending trop vieux (>5 min)
+                # Expire pending entries older than 5 min
                 expired = [
                     a for a, info in self.pending_copy.items()
                     if now - info["ts"] > COPY_TRADE_WATCH_TTL
                 ]
                 for addr in expired:
-                    self.log(f"⌛ Copy trade expiré (jamais apparu sur DexScreener): {addr[:8]}...")
+                    self.log(f"⌛ Copy trade expired (never appeared on DexScreener): {addr[:8]}...")
                     del self.pending_copy[addr]
 
-                # Requêter DexScreener pour TOUS les pending (nouveau + retry)
+                # Query DexScreener for ALL pending entries (new + retry)
                 all_copy_addrs = list(self.pending_copy.keys())
                 if all_copy_addrs:
                     async with httpx.AsyncClient(timeout=8) as c4:
@@ -411,19 +411,19 @@ class MemeScanner:
                                     await _add_tokens(p_c)
                                     added = len(tokens) - before
                                     n_copy += added
-                                    # Marquer copy_trade + wallet_hit_count depuis pending
+                                    # Mark copy_trade + wallet_hit_count from pending
                                     for mc in tokens[before:]:
                                         mc.copy_trade = True
                                         info = self.pending_copy.get(mc.address, {})
                                         mc.wallet_hit_count = len(info.get("wallets", set()))
-                                        # Retirer du pending si trouvé avec liquidité suffisante
+                                        # Remove from pending if found with sufficient liquidity
                                         if mc.liquidity_usd > 5_000 and mc.address in self.pending_copy:
                                             del self.pending_copy[mc.address]
                             except Exception as e:
-                                self.log(f"Erreur copy batch: {type(e).__name__}: {e}")
+                                self.log(f"copy batch error: {type(e).__name__}: {e}")
 
-                # Fix dedup : si un token copy trade était déjà dans le pool
-                # depuis les sources 1-3, on le marque copy_trade + wallet_hit_count quand même
+                # Dedup fix: if a copy-trade token was already in the pool
+                # from sources 1-3, mark it copy_trade + wallet_hit_count anyway
                 copy_addr_set = set(all_copy_addrs)
                 for mc in tokens:
                     if mc.address in copy_addr_set and not mc.copy_trade:
@@ -433,20 +433,20 @@ class MemeScanner:
                         n_copy += 1
 
             except Exception as e:
-                self.log(f"Erreur copy trading: {type(e).__name__}: {e}")
+                self.log(f"copy trading error: {type(e).__name__}: {e}")
 
         sources = 5 if (self.wallet_tracker and self.wallet_tracker.ALPHA_WALLETS) else 4
         copy_info = f" +{n_copy}copy" if n_copy > 0 else ""
         new_info  = f" +{n_new_listing}new" if n_new_listing > 0 else ""
-        self.log(f"📊 {len(tokens)} tokens scannés ({sources} sources{new_info}{copy_info})")
+        self.log(f"📊 {len(tokens)} tokens scanned ({sources} sources{new_info}{copy_info})")
         return tokens
 
     def filter_tokens(self, tokens: list[MemeCoin]) -> list[tuple[MemeCoin, dict]]:
-        """Filtre et score les tokens selon les critères de sécurité."""
+        """Filter and score tokens against safety criteria."""
         results = []
 
         for token in tokens:
-            # Filtres durs
+            # Hard filters
             if token.liquidity_usd < MIN_LIQUIDITY_USD:
                 continue
             if token.volume_24h < MIN_VOLUME_24H_USD:
@@ -467,20 +467,20 @@ class MemeScanner:
             if score["points"] >= 30:
                 results.append((token, score))
 
-        # Trier par score décroissant
+        # Sort by descending score
         results.sort(key=lambda x: x[1]["points"], reverse=True)
         return results
 
     def format_alert(self, token: MemeCoin, score: dict) -> str:
-        """Formate une alerte meme coin."""
-        age_str = f"{token.age_hours:.1f}h" if token.age_hours < 24 else f"{token.age_hours/24:.1f}j"
+        """Format a memecoin alert."""
+        age_str = f"{token.age_hours:.1f}h" if token.age_hours < 24 else f"{token.age_hours/24:.1f}d"
         buy_ratio = (
             f"{token.txns_1h_buys/(token.txns_1h_buys+token.txns_1h_sells)*100:.0f}%"
             if (token.txns_1h_buys + token.txns_1h_sells) > 0 else "?"
         )
 
         flags_str = " | ".join(score["flags"]) if score["flags"] else "—"
-        warnings_str = " | ".join(score["warnings"]) if score["warnings"] else "Aucun"
+        warnings_str = " | ".join(score["warnings"]) if score["warnings"] else "None"
 
         mcap_str = (
             f"${token.market_cap/1_000_000:.2f}M" if token.market_cap >= 1_000_000
@@ -494,26 +494,26 @@ class MemeScanner:
 {'='*55}
 🚨 MEME COIN OPPORTUNITY [{score['points']} pts]
 Token     : {token.symbol} ({token.name})
-Adresse   : {token.address}
+Address   : {token.address}
 DEX       : {token.dex_id.upper()}
-Prix      : ${token.price_usd:.8f}
+Price     : ${token.price_usd:.8f}
 Market cap: {mcap_str}
-Liquidité : {liq_str}
+Liquidity : {liq_str}
 Volume 1h : ${token.volume_1h/1_000:.0f}K
 Pump 1h   : +{token.price_change_1h:.1f}%
 Pump 6h   : {token.price_change_6h:+.1f}%
 Age       : {age_str}
-Buys/Total: {buy_ratio} ({token.txns_1h_buys}B / {token.txns_1h_sells}S en 1h)
-Signaux   : {flags_str}
+Buys/Total: {buy_ratio} ({token.txns_1h_buys}B / {token.txns_1h_sells}S in 1h)
+Signals   : {flags_str}
 Warnings  : ⚠️ {warnings_str}
 Chart     : https://dexscreener.com/solana/{token.address}
 {'='*55}"""
 
     async def run(self, interval_seconds: int = 60):
-        """Boucle de scan — vérifie toutes les 60s."""
+        """Scan loop — checks every 60s."""
         self.running = True
-        self.log("Scanner meme coins démarré (DexScreener)")
-        self.log(f"Critères: liq>${MIN_LIQUIDITY_USD/1000:.0f}K | vol24h>${MIN_VOLUME_24H_USD/1000:.0f}K | pump1h>+{MIN_PRICE_CHANGE_1H}%")
+        self.log("Memecoin scanner started (DexScreener)")
+        self.log(f"Criteria: liq>${MIN_LIQUIDITY_USD/1000:.0f}K | vol24h>${MIN_VOLUME_24H_USD/1000:.0f}K | pump1h>+{MIN_PRICE_CHANGE_1H}%")
 
         while self.running:
             try:
@@ -522,19 +522,19 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     opportunities = self.filter_tokens(tokens)
                     if opportunities:
                         for token, score in opportunities[:3]:  # top 3 max
-                            # Cooldown pour éviter les spams
+                            # Cooldown to avoid spam
                             last = self.last_alerts.get(token.address, 0)
                             if time.time() - last > self.alert_cooldown:
                                 alert = self.format_alert(token, score)
                                 print(alert)
                                 self.last_alerts[token.address] = time.time()
                     else:
-                        self.log(f"Scan: {len(tokens)} tokens analysés — aucune opportunité")
+                        self.log(f"Scan: {len(tokens)} tokens analyzed — no opportunity")
                 else:
-                    self.log("Scan: aucun token récupéré")
+                    self.log("Scan: no tokens fetched")
 
             except Exception as e:
-                self.log(f"Erreur scan: {e}")
+                self.log(f"Scan error: {e}")
 
             await asyncio.sleep(interval_seconds)
 
@@ -543,7 +543,7 @@ Chart     : https://dexscreener.com/solana/{token.address}
 
 
 async def main():
-    """Test standalone du scanner."""
+    """Standalone scanner test."""
     scanner = MemeScanner()
     try:
         await scanner.run(interval_seconds=60)
