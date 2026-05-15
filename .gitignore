@@ -1,0 +1,45 @@
+# Secrets — NEVER commit
+.env
+*.key
+*_secret*
+private_key*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.Python
+build/
+dist/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs / data
+*.log
+logs/
+trades.db
+*.sqlite
+
+# Local config overrides
+config.local.py
+
+# Private marketing/sales assets (NEVER push to public repo)
+GUMROAD_SALES_PAGE.md
+LAUNCH_TWEETS.md
+*_PRIVATE.md
