@@ -105,7 +105,7 @@ The Premium version (Gumroad — $49 one-time) includes:
 - 💬 **Discord private support** (direct DMs to me for setup questions)
 - 🔄 **Lifetime updates** (new filters, new alpha wallets added monthly)
 
-**[Get Premium → Gumroad link]**
+**[Get Premium on Gumroad → $49](https://0xmchd.gumroad.com/l/afsebf)**
 
 Free OSS version stays free forever. Premium funds further development.
 
