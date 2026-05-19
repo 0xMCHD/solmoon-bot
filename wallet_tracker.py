@@ -51,6 +51,22 @@ class WalletTracker:
         "FbiBbTBP2Vs7b3j74eBsAYFpxWms11m23DeGmYcc8Yoo",  # top new — +289% PnL / 73% WR / 107tx / $17K
         "nrzLzxvq1EENDEi5cYp2H8ZscyLKa79yfQ9XWm3zbxt",   # +133% PnL / 60% WR / 34tx — axiom+smart_degen
         "5d3jQcuUvsuHyZkhdp78FFqc7WogrzZpTtec1X9VNkuE",  # +127% PnL / 55% WR / 37tx — $30K / kol+smart_degen
+
+        # Added 2026-05-13 (curated from GMGN.ai 7d+30d cross-validation)
+        "74oNN9VfJv2V2SJf4RFSiKPKbrgyMdz7agkaeikRSgm5",  # +319% PnL 7d / 68% WR / 388tx 30d — axiom+launchpad_smart
+        "FRcHp2wrSk2Ej9Y81DFEVJ7U8arL1ki5RX6c49Wa3M8J",  # +161% PnL 7d / 100% WR! / 35tx — smart_degen
+        "FWNmzY26FnsmpaWPQQJXQ24PQAyKtDByJz9HMa24s1z5",  # VOLUME BEAST — 5377 trades 30d / 93% WR / $62K profit
+        "D1gwKFveaQ2mogvv5dhHNa7cfdcuGQphtfiwe22sm3nL",  # +77% PnL 7d / 57% WR — smart_degen+trojan
+        "HtbXDAE1xX35vXhE3raVuYiZrykWiFWcnDJyy3WLo9So",  # +71% PnL / 511tx 30d — axiom+launchpad_smart
+        "8FiuwM6FmVKmBLCaJ6QcNScnVw4NuNs7Tt4Skf91saF8",  # BEST CONSISTENCY — 88% WR 7d AND 85% WR 30d
+        "21cutQKXw6opqwAcUfVVSDFbjKjs9NA94cUTfYBy4SZ6",  # 657 trades 30d — axiom+launchpad_smart+padre
+        "ExkBDVdrrN7woPX42v5sfJa7AvHKhAb2uU9Fwzhhokno",  # 965 trades 30d — axiom+launchpad_smart+padre
+        "CevfH18c59S1TwPuP3vgLD6W4q1Nf8nRdVNNLHnUMiWp",  # 671 trades 30d / 60% WR 30d — launchpad_smart+padre
+
+        # Added 2026-05-19 (Day 0 of Personal Challenge — fresh GMGN scrape)
+        "7S3E2L25kr6oN2cMP2GQ5tMEfg8jwcmoYo35vvv8rxhW",  # TOP — +118% PnL 7d / 76% WR / 83tx / $12.8K — axiom+smart_degen
+        "Gf2wYM2k5ojfPzN5Uqi3mbP1nWEdZhhzMyDBsKrHA3kC",  # +62% PnL 7d / 60% WR + 1d momentum +108% — launchpad_smart+padre
+        "THXcGyTMLSKWmvpDpdgL8G224xfMXksCfA29LBoJfUJ",   # +71% PnL 7d / 65% WR / 90tx — axiom+bullx+smart_degen
     ]
 
     def __init__(self, rpc_url: str):
