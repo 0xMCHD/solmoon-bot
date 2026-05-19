@@ -127,6 +127,11 @@ class RugChecker:
 
 
 # ---------------------------------------------------------------------------
+STATS_FILE = "stats.json"
+DAILY_CIRCUIT_BREAKER_PCT = -10.0   # pause 24h if intraday PnL <= -10%
+CIRCUIT_BREAKER_PAUSE_SEC = 86400   # 24h pause after circuit breaker hits
+
+
 class MemeTrader:
     """Memecoin bot with partial exit + trailing stop + 2 simultaneous trades."""
 
@@ -147,9 +152,100 @@ class MemeTrader:
         self.paper_mode = False   # LIVE MODE
         self.running = False
 
+        # Circuit breaker — daily loss tracking
+        self.daily_pnl_sol = 0.0           # cumulative PnL today
+        self.daily_start_balance = 0.0     # balance at start of day
+        self.daily_reset_ts = 0.0          # when to reset the daily counter
+        self.circuit_breaker_until = 0.0   # bot paused until this timestamp
+
+        # Load persisted stats if available
+        self._load_stats()
+
     def log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"[{ts}] [MEME-TRADER] {msg}")
+
+    # ------------------------------------------------------------------
+    # Stats persistence — survives bot restarts
+    # ------------------------------------------------------------------
+    def _load_stats(self):
+        """Load persisted stats from STATS_FILE if it exists."""
+        import json, os
+        if not os.path.exists(STATS_FILE):
+            return
+        try:
+            with open(STATS_FILE, "r") as f:
+                d = json.load(f)
+            self.wins = d.get("wins", 0)
+            self.losses = d.get("losses", 0)
+            self.trade_count = d.get("total_trades", 0)
+            self.total_pnl_sol = d.get("total_pnl_sol", 0.0)
+            self.daily_pnl_sol = d.get("daily_pnl_sol", 0.0)
+            self.daily_start_balance = d.get("daily_start_balance", 0.0)
+            self.daily_reset_ts = d.get("daily_reset_ts", 0.0)
+            self.circuit_breaker_until = d.get("circuit_breaker_until", 0.0)
+            self.log(f"📂 Stats loaded — {self.wins}W/{self.losses}L over {self.trade_count} trades")
+        except Exception as e:
+            self.log(f"⚠️ Stats load error (starting fresh): {e}")
+
+    def _save_stats(self):
+        """Persist stats to STATS_FILE so we survive restarts."""
+        import json
+        try:
+            data = {
+                "wins": self.wins,
+                "losses": self.losses,
+                "total_trades": self.trade_count,
+                "total_pnl_sol": self.total_pnl_sol,
+                "daily_pnl_sol": self.daily_pnl_sol,
+                "daily_start_balance": self.daily_start_balance,
+                "daily_reset_ts": self.daily_reset_ts,
+                "circuit_breaker_until": self.circuit_breaker_until,
+                "last_updated": time.time(),
+                "last_updated_human": datetime.now().isoformat(),
+            }
+            with open(STATS_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            self.log(f"⚠️ Stats save error: {e}")
+
+    # ------------------------------------------------------------------
+    # Circuit breaker — pause bot 24h if intraday loss too big
+    # ------------------------------------------------------------------
+    async def _check_circuit_breaker(self) -> bool:
+        """Returns True if bot is currently paused by circuit breaker."""
+        now = time.time()
+
+        # Still in paused window?
+        if now < self.circuit_breaker_until:
+            remaining_h = (self.circuit_breaker_until - now) / 3600
+            self.log(f"🛑 CIRCUIT BREAKER active — {remaining_h:.1f}h remaining")
+            return True
+
+        # Reset daily counter every 24h
+        if now > self.daily_reset_ts:
+            try:
+                bal = await wallet.get_sol_balance(self.pubkey)
+                self.daily_start_balance = bal
+            except Exception:
+                pass
+            self.daily_pnl_sol = 0.0
+            self.daily_reset_ts = now + 86400
+            self._save_stats()
+
+        # Check if intraday loss triggers breaker
+        if self.daily_start_balance > 0:
+            daily_pct = (self.daily_pnl_sol / self.daily_start_balance) * 100
+            if daily_pct <= DAILY_CIRCUIT_BREAKER_PCT:
+                self.circuit_breaker_until = now + CIRCUIT_BREAKER_PAUSE_SEC
+                self._save_stats()
+                self.log(
+                    f"🚨 CIRCUIT BREAKER TRIGGERED — {daily_pct:.1f}% intraday "
+                    f"(daily PnL: {self.daily_pnl_sol:+.4f} SOL). "
+                    f"Bot paused 24h."
+                )
+                return True
+        return False
 
     # ------------------------------------------------------------------
     async def init(self):
@@ -673,6 +769,14 @@ Chart     : https://dexscreener.com/solana/{token.address}
         timeout_log_ts: float = 0              # anti-spam timeout log
         blind_log_ts: float = 0                # anti-spam "price unavailable" log
 
+        # MOON mode — partial take profits at +50% and +100%
+        # Lesson from Cap +421%: never give back everything to trailing stop.
+        # Lock 25% at +50% (you can't lose money on this trade anymore).
+        # Lock another 25% at +100% (de-risked further).
+        # Remaining 50% rides the trailing stop for the moonshot.
+        moon_tp1_done = False   # 25% sold at +50%
+        moon_tp2_done = False   # 25% sold at +100%
+
         while True:
             # ── Timeout: disabled if trailing active AND position profitable ──
             # SAM case: cut at +21.6% while trailing SL was managing exit.
@@ -750,6 +854,24 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     partial_sold = True
                     self.log(f"  ✅ 50% secured | remaining rides with trailing stop")
 
+                # ── PARTIAL TPs in MOON mode (lesson from Cap +421%) ──────
+                # +50% : sell 25% (irreversible win — trade is now risk-free)
+                # +100%: sell 25% more (de-risk further, ride the 50% rest)
+                if moon_mode and not moon_tp1_done and pnl_pct >= 50:
+                    self.log(f"  🌙 MOON TP1 {token.symbol} +{pnl_pct:.1f}% — locking 25%")
+                    # ratio=0.25 of REMAINING balance (which is 100% at this point)
+                    sold_ok = await self._sell_with_retry(token, ratio=0.25)
+                    if sold_ok:
+                        moon_tp1_done = True
+                        self.log(f"  ✅ 25% locked at +50% | 75% riding")
+                if moon_mode and moon_tp1_done and not moon_tp2_done and pnl_pct >= 100:
+                    self.log(f"  🌙 MOON TP2 {token.symbol} +{pnl_pct:.1f}% — locking 25% more")
+                    # We're now selling 25% of what's left (75%) → that's 0.25/0.75 ≈ 0.33 of remaining
+                    sold_ok = await self._sell_with_retry(token, ratio=0.333)
+                    if sold_ok:
+                        moon_tp2_done = True
+                        self.log(f"  ✅ Total 50% locked (25% @ +50%, 25% @ +100%) | 50% moonshot riding")
+
                 # ── TRAILING ACTIVATION ──────────────────────────────────
                 if not trailing_active and pnl_pct >= TRAILING_ACTIVATE_PCT * 100:
                     trailing_active = True
@@ -758,7 +880,14 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     self.log(f"  🔒 Trailing stop activated [{trail_tag}] | SL: ${trailing_sl:.8f}")
 
                 trail_info = f" | Trail SL ${trailing_sl:.8f}" if trailing_active else ""
-                partial_info = " [50% secured]" if partial_sold else ""
+                if moon_mode and moon_tp2_done:
+                    partial_info = " [50% locked]"
+                elif moon_mode and moon_tp1_done:
+                    partial_info = " [25% locked]"
+                elif partial_sold:
+                    partial_info = " [50% secured]"
+                else:
+                    partial_info = ""
                 self.log(
                     f"  {token.symbol}: ${current_price:.8f} | PnL: {pnl_pct:+.1f}%"
                     f" | {elapsed}s{partial_info}{trail_info}"
@@ -877,6 +1006,11 @@ Chart     : https://dexscreener.com/solana/{token.address}
 
         while self.running:
             try:
+                # Circuit breaker check — pause if intraday loss > -10%
+                if await self._check_circuit_breaker():
+                    await asyncio.sleep(300)  # re-check every 5min while paused
+                    continue
+
                 # Clean expired entries from skip_cache
                 now = time.time()
                 self.skip_cache = {a: v for a, v in self.skip_cache.items() if v[0] > now}
@@ -977,6 +1111,21 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     f"⚠️ SELL UNCERTAIN {token.symbol} — "
                     f"check wallet, tokens may be unsold | {self.wins}W/{self.losses}L"
                 )
+
+            # Update daily PnL counter for circuit breaker
+            # Try to fetch new balance to compute realized PnL since trade entry
+            try:
+                new_bal = await wallet.get_sol_balance(self.pubkey)
+                entry_info = self.active_trades.get(token.address, {})
+                # If we tracked entry balance, compute delta. Otherwise approximate.
+                # Simple approximation: delta vs daily_start_balance + previous daily_pnl
+                if self.daily_start_balance > 0:
+                    realized_today = new_bal - self.daily_start_balance
+                    self.daily_pnl_sol = realized_today
+            except Exception:
+                pass
+
+            self._save_stats()
         finally:
             self.active_trades.pop(token.address, None)
             self.trade_cooldowns[token.address] = time.time() + TRADE_COOLDOWN_SECONDS

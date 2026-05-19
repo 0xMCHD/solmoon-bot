@@ -48,3 +48,11 @@ OUTREACH_TRACKER.md
 
 # Premium product folder (paid content — never goes on public repo)
 premium_pack/
+
+# Prospect lists (private business data)
+prospects_*.csv
+solmoon-premium-*.zip
+
+# Personal trading stats (private)
+stats.json
+trades_log.md
