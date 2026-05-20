@@ -51,6 +51,7 @@ premium_pack/
 
 # Prospect lists (private business data)
 prospects_*.csv
+test_enriched.csv
 solmoon-premium-*.zip
 
 # Personal trading stats (private)
