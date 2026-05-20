@@ -57,8 +57,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Auto-refresh every 30s
-st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
+# Auto-refresh every hour (balance snapshots are every 30min, so 1h is plenty)
+# Manual refresh available via the "🔄 Refresh now" button below or Cmd+R / F5.
+st.markdown('<meta http-equiv="refresh" content="3600">', unsafe_allow_html=True)
 
 CHALLENGE_START_BALANCE = 0.800607   # SOL — Day 0 anchor
 CHALLENGE_START_DATE = datetime(2026, 5, 19)
@@ -91,13 +92,18 @@ wallet_stats = load_json("wallet_signal_stats.json", {})
 # ─────────────────────────────────────────────────────────────────────
 # Header
 # ─────────────────────────────────────────────────────────────────────
-col_title, col_status = st.columns([3, 1])
+col_title, col_refresh, col_status = st.columns([3, 1, 1])
 with col_title:
     st.title("🌙 SolMoon Dashboard")
     st.caption(
         f"Personal Challenge — Day 0: {CHALLENGE_START_DATE.strftime('%Y-%m-%d')} "
-        f"· Last update: {datetime.now().strftime('%H:%M:%S')}"
+        f"· Last update: {datetime.now().strftime('%H:%M:%S')} "
+        f"· Auto-refresh: 1h"
     )
+with col_refresh:
+    st.write("")  # spacer
+    if st.button("🔄 Refresh now", use_container_width=True):
+        st.rerun()
 with col_status:
     cb_until = stats.get("circuit_breaker_until", 0)
     import time
@@ -335,5 +341,5 @@ st.caption(
     "[github.com/0xMchd/solmoon-bot](https://github.com/0xMchd/solmoon-bot) · "
     "[Premium](https://0xmchd.gumroad.com/l/afsebf) · "
     "Built by [@0xMchd](https://twitter.com/0xMchd) · "
-    "Auto-refresh 30s"
+    "Auto-refresh 1h · use 🔄 button for instant update"
 )
