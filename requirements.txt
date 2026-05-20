@@ -4,3 +4,8 @@ solders==0.21.0
 solana==0.34.3
 base58==2.1.1
 python-dotenv==1.0.1
+
+# Dashboard (optional — only if you run dashboard.py)
+streamlit>=1.30
+pandas>=2.0
+plotly>=5.18

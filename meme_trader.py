@@ -128,8 +128,10 @@ class RugChecker:
 
 # ---------------------------------------------------------------------------
 STATS_FILE = "stats.json"
-DAILY_CIRCUIT_BREAKER_PCT = -10.0   # pause 24h if intraday PnL <= -10%
-CIRCUIT_BREAKER_PAUSE_SEC = 86400   # 24h pause after circuit breaker hits
+BALANCE_HISTORY_FILE = "balance_history.json"   # snapshots for dashboard chart
+BALANCE_SNAPSHOT_INTERVAL = 1800                # 30 min between snapshots
+DAILY_CIRCUIT_BREAKER_PCT = -10.0               # pause 24h if intraday PnL <= -10%
+CIRCUIT_BREAKER_PAUSE_SEC = 86400               # 24h pause after circuit breaker hits
 
 
 class MemeTrader:
@@ -157,6 +159,9 @@ class MemeTrader:
         self.daily_start_balance = 0.0     # balance at start of day
         self.daily_reset_ts = 0.0          # when to reset the daily counter
         self.circuit_breaker_until = 0.0   # bot paused until this timestamp
+
+        # Balance snapshot timing
+        self._last_balance_snapshot_ts = 0.0
 
         # Load persisted stats if available
         self._load_stats()
@@ -208,6 +213,41 @@ class MemeTrader:
                 json.dump(data, f, indent=2)
         except Exception as e:
             self.log(f"⚠️ Stats save error: {e}")
+
+    async def _snapshot_balance(self):
+        """Append a balance snapshot to history (for dashboard chart). Throttled."""
+        import json, os
+        now = time.time()
+        if now - self._last_balance_snapshot_ts < BALANCE_SNAPSHOT_INTERVAL:
+            return
+        try:
+            bal = await wallet.get_sol_balance(self.pubkey)
+        except Exception:
+            return
+        history = []
+        if os.path.exists(BALANCE_HISTORY_FILE):
+            try:
+                with open(BALANCE_HISTORY_FILE) as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+        history.append({
+            "ts": now,
+            "iso": datetime.now().isoformat(),
+            "balance_sol": bal,
+            "wins": self.wins,
+            "losses": self.losses,
+            "trades": self.trade_count,
+            "active_trades": len(self.active_trades),
+        })
+        # Keep last 1000 entries (~20 days at 30min interval)
+        history = history[-1000:]
+        try:
+            with open(BALANCE_HISTORY_FILE, "w") as f:
+                json.dump(history, f, indent=2)
+            self._last_balance_snapshot_ts = now
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Circuit breaker — pause bot 24h if intraday loss too big
@@ -1019,6 +1059,9 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 if time.time() - self._last_wallet_summary_ts > 21600:
                     self.scanner.log_wallet_performance()
                     self._last_wallet_summary_ts = time.time()
+
+                # Balance snapshot for dashboard (every 30min)
+                await self._snapshot_balance()
 
                 # Clean expired entries from skip_cache
                 now = time.time()
