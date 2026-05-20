@@ -989,6 +989,10 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 )
                 await asyncio.sleep(wait)
 
+        # Initial wallet performance snapshot (if any history)
+        self.scanner.log_wallet_performance()
+        self._last_wallet_summary_ts = time.time()
+
         self.log("=" * 58)
         self.log("MEME TRADER ACTIVE — CAPITAL MAXIMIZATION STRATEGY")
         self.log(f"Entry: 1h pump +{ENTRY_PUMP_1H_MIN}% → +{ENTRY_PUMP_1H_MAX}%")
@@ -1010,6 +1014,11 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 if await self._check_circuit_breaker():
                     await asyncio.sleep(300)  # re-check every 5min while paused
                     continue
+
+                # Periodic wallet performance log (every 6h)
+                if time.time() - self._last_wallet_summary_ts > 21600:
+                    self.scanner.log_wallet_performance()
+                    self._last_wallet_summary_ts = time.time()
 
                 # Clean expired entries from skip_cache
                 now = time.time()

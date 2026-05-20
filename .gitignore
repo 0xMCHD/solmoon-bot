@@ -56,3 +56,4 @@ solmoon-premium-*.zip
 # Personal trading stats (private)
 stats.json
 trades_log.md
+wallet_signal_stats.json

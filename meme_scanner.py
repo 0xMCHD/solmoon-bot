@@ -145,9 +145,11 @@ class MemeCoin:
         }
 
 
-COPY_TRADE_WATCH_TTL      = 300   # 5 min for a copy-traded token to appear on DexScreener
+COPY_TRADE_WATCH_TTL      = 900   # 15 min — fresh pump.fun tokens need time to be indexed
 NEW_LISTING_MAX_AGE_MIN   = 20    # 20 min max for a Raydium "new listing"
 PUMPFUN_API               = "https://frontend-api.pump.fun/coins"
+
+WALLET_STATS_FILE         = "wallet_signal_stats.json"
 
 
 class MemeScanner:
@@ -160,6 +162,77 @@ class MemeScanner:
         # Structure: {token_addr: {"ts": float, "wallets": set[str]}}
         # "wallets" = set of wallet addresses that bought this token
         self.pending_copy: dict[str, dict] = {}
+
+        # Per-wallet signal performance stats — persisted across restarts
+        # Structure: {wallet_addr: {"sent": int, "resolved": int, "expired": int, "first_seen": ts}}
+        # - sent     : total signals emitted by this wallet
+        # - resolved : signals that successfully appeared on DexScreener (tradeable)
+        # - expired  : signals that vanished (pump.fun rug or never indexed)
+        # Resolution rate = resolved / sent → cold wallets have <30% rate
+        self.wallet_signal_stats: dict[str, dict] = {}
+        self._load_wallet_stats()
+        self._last_summary_ts = 0.0
+
+    def _load_wallet_stats(self):
+        """Load persisted wallet signal stats."""
+        import json, os
+        if not os.path.exists(WALLET_STATS_FILE):
+            return
+        try:
+            with open(WALLET_STATS_FILE) as f:
+                self.wallet_signal_stats = json.load(f)
+        except Exception:
+            self.wallet_signal_stats = {}
+
+    def _save_wallet_stats(self):
+        """Persist wallet signal stats."""
+        import json
+        try:
+            with open(WALLET_STATS_FILE, "w") as f:
+                json.dump(self.wallet_signal_stats, f, indent=2)
+        except Exception:
+            pass
+
+    def _bump_wallet_stat(self, wallet_addr: str, key: str):
+        """Increment a stat counter for a wallet."""
+        if not wallet_addr:
+            return
+        if wallet_addr not in self.wallet_signal_stats:
+            self.wallet_signal_stats[wallet_addr] = {
+                "sent": 0, "resolved": 0, "expired": 0,
+                "first_seen": time.time(),
+            }
+        self.wallet_signal_stats[wallet_addr][key] = (
+            self.wallet_signal_stats[wallet_addr].get(key, 0) + 1
+        )
+
+    def log_wallet_performance(self):
+        """Print a leaderboard of wallet signal performance. Call periodically."""
+        if not self.wallet_signal_stats:
+            return
+        rows = []
+        for addr, s in self.wallet_signal_stats.items():
+            sent = s.get("sent", 0)
+            resolved = s.get("resolved", 0)
+            expired = s.get("expired", 0)
+            if sent == 0:
+                continue
+            rate = resolved / sent * 100
+            rows.append((addr, sent, resolved, expired, rate))
+        if not rows:
+            return
+        rows.sort(key=lambda x: -x[4])  # by resolution rate descending
+        self.log("─" * 64)
+        self.log(f"📊 Wallet signal performance ({len(rows)} active)")
+        self.log(f"  {'wallet':<14s} {'sent':>5s} {'resolved':>9s} {'expired':>8s} {'rate':>7s}")
+        for addr, sent, resolved, expired, rate in rows[:15]:
+            self.log(f"  {addr[:8]}...{addr[-4:]:<2s} {sent:>5d} {resolved:>9d} {expired:>8d} {rate:>6.0f}%")
+        cold = [r for r in rows if r[1] >= 5 and r[4] < 25]
+        if cold:
+            self.log(f"  ⚠️ {len(cold)} cold wallet(s) (≥5 sent, <25% resolve):")
+            for addr, *_ in cold:
+                self.log(f"     → {addr} — consider removing")
+        self.log("─" * 64)
 
     def log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -180,6 +253,8 @@ class MemeScanner:
             self.log(f"⏳ Copy trade pending DexScreener: {token_addr[:8]}...")
         if wallet_addr:
             self.pending_copy[token_addr]["wallets"].add(wallet_addr)
+            # Track that this wallet sent a signal
+            self._bump_wallet_stat(wallet_addr, "sent")
 
     async def fetch_trending(self) -> list[MemeCoin]:
         """Fetch Solana trending tokens on DexScreener (3 sources)."""
@@ -385,14 +460,20 @@ class MemeScanner:
             try:
                 now = time.time()
 
-                # Expire pending entries older than 5 min
+                # Expire pending entries older than TTL
                 expired = [
                     a for a, info in self.pending_copy.items()
                     if now - info["ts"] > COPY_TRADE_WATCH_TTL
                 ]
                 for addr in expired:
+                    info = self.pending_copy[addr]
                     self.log(f"⌛ Copy trade expired (never appeared on DexScreener): {addr[:8]}...")
+                    # Track expiration per wallet that sent this signal
+                    for w in info.get("wallets", set()):
+                        self._bump_wallet_stat(w, "expired")
                     del self.pending_copy[addr]
+                if expired:
+                    self._save_wallet_stats()
 
                 # Query DexScreener for ALL pending entries (new + retry)
                 all_copy_addrs = list(self.pending_copy.keys())
@@ -418,7 +499,11 @@ class MemeScanner:
                                         mc.wallet_hit_count = len(info.get("wallets", set()))
                                         # Remove from pending if found with sufficient liquidity
                                         if mc.liquidity_usd > 5_000 and mc.address in self.pending_copy:
+                                            # Track resolution per wallet that sent the signal
+                                            for w in info.get("wallets", set()):
+                                                self._bump_wallet_stat(w, "resolved")
                                             del self.pending_copy[mc.address]
+                                    self._save_wallet_stats()
                             except Exception as e:
                                 self.log(f"copy batch error: {type(e).__name__}: {e}")
 
