@@ -131,13 +131,13 @@ class RugChecker:
 STATS_FILE = "stats.json"
 BALANCE_HISTORY_FILE = "balance_history.json"   # snapshots for dashboard chart
 BALANCE_SNAPSHOT_INTERVAL = 1800                # 30 min between snapshots
-DAILY_CIRCUIT_BREAKER_PCT = -15.0               # pause 24h if intraday PnL <= -15%
-                                                # (raised from -10% — DNS dropouts during open
-                                                # trades caused false positives because the
-                                                # balance dropped mid-trade and was misread as
-                                                # a closed loss; the new threshold is 1.5×
-                                                # the worst single-trade SL so it only fires
-                                                # on genuine multi-trade losing streaks)
+DAILY_CIRCUIT_BREAKER_PCT = -50.0               # effectively disabled
+                                                # WHY: daily_pnl is computed from balance delta,
+                                                # which incorrectly treats SELL UNCERTAIN held
+                                                # tokens as realized losses. Until we track
+                                                # realized PnL per trade properly, the breaker
+                                                # is unreliable. The 0.50 SOL kill switch in
+                                                # CHALLENGE_PRIVATE.md remains the real safety net.
 CIRCUIT_BREAKER_PAUSE_SEC = 86400               # 24h pause after circuit breaker hits
 
 
