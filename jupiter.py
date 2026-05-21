@@ -63,6 +63,86 @@ async def get_price(input_mint: str = config.SOL_MINT,
     return None
 
 
+async def probe_token_tradeable(token_mint: str,
+                                probe_amount_sol: float = 0.01) -> dict | None:
+    """
+    Quick probe: is this token currently tradeable on Solana ?
+
+    Calls Jupiter /order with a small amount (0.01 SOL ~ $1.50) WITHOUT taker.
+    If Jupiter returns a route, the token has liquidity. We don't execute —
+    just check whether a swap is possible AND estimate slippage / price.
+
+    Returns dict with:
+        - tradeable      : bool — Jupiter has a route
+        - price_per_token: float — derived from outAmount/inAmount
+        - price_impact   : float — % price impact for our probe size
+        - out_amount     : int — raw token amount we'd receive
+        - route_count    : int — number of DEXes in the route
+        - error          : str | None — exception or HTTP error
+
+    None if probe failed (network down).
+    """
+    import asyncio
+
+    lamports = int(probe_amount_sol * config.LAMPORTS_PER_SOL)
+    params = {
+        "inputMint": config.SOL_MINT,
+        "outputMint": token_mint,
+        "amount": str(lamports),
+        "slippageBps": 500,  # 5% — large probe slippage tolerance
+        "dynamicComputeUnitLimit": "true",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=6) as client:
+            resp = await client.get(
+                f"{config.JUPITER_API_URL}/order",
+                params=params,
+                headers=_headers(),
+            )
+    except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+        return None
+    except Exception:
+        return None
+
+    if resp.status_code != 200:
+        # 400/404 = no route / unknown token = not tradeable yet
+        return {"tradeable": False, "error": f"HTTP {resp.status_code}"}
+
+    try:
+        data = resp.json()
+    except Exception:
+        return {"tradeable": False, "error": "invalid json"}
+
+    in_amount = int(data.get("inAmount", 0))
+    out_amount = int(data.get("outAmount", 0))
+    if in_amount <= 0 or out_amount <= 0:
+        return {"tradeable": False, "error": "zero amounts"}
+
+    # Compute price (tokens per SOL)
+    # Note: token decimals vary — Jupiter returns raw amounts. The caller
+    # can use this with the token's decimals if known. For tradeability check
+    # alone, we only need to know out_amount > 0.
+    price_impact = 0.0
+    try:
+        price_impact = float(data.get("priceImpactPct", "0") or 0)
+    except Exception:
+        pass
+
+    # Count DEXes touched
+    route_plan = data.get("routePlan", []) or []
+    route_count = len(route_plan)
+
+    return {
+        "tradeable": True,
+        "in_amount": in_amount,
+        "out_amount": out_amount,
+        "price_impact": price_impact,
+        "route_count": route_count,
+        "error": None,
+    }
+
+
 async def get_quote(input_mint: str,
                     output_mint: str,
                     amount_lamports: int,

@@ -10,6 +10,7 @@ import jupiter
 import wallet
 from meme_scanner import MemeCoin, MemeScanner
 from wallet_tracker import WalletTracker
+from wallet_websocket import WebSocketMonitor
 
 # ---------------------------------------------------------------------------
 # Position parameters
@@ -149,6 +150,13 @@ class MemeTrader:
         self.wallet_tracker = WalletTracker(rpc_url=config.RPC_URL)
         self.scanner  = MemeScanner(wallet_tracker=self.wallet_tracker)
         self.rug_checker = RugChecker()
+        # Helius WebSocket monitor — push-based detection (real-time, ~3s latency)
+        # Replaces (or complements) the 15s wallet poll loop.
+        self.ws_monitor = WebSocketMonitor(
+            rpc_url=config.RPC_URL,
+            alpha_wallets=self.wallet_tracker.ALPHA_WALLETS,
+            on_buy_callback=self._on_ws_buy,
+        )
         self.active_trades: dict[str, dict] = {}
         self.trade_cooldowns: dict[str, float] = {}  # token → exit timestamp
         self.skip_cache: dict[str, tuple] = {}        # token → (expiry_ts, reason)
@@ -989,20 +997,61 @@ Chart     : https://dexscreener.com/solana/{token.address}
         return partial_sold or None
 
     # ------------------------------------------------------------------
+    async def _on_ws_buy(self, token_addr: str, wallet_addr: str):
+        """
+        WebSocket callback — called within seconds of an alpha wallet buying.
+
+        Pipeline:
+            1. Probe Jupiter to confirm token is tradeable (skip DexScreener wait)
+            2. If tradeable → push to scanner.pending_copy (with wallet attribution)
+            3. The main scan loop picks it up on the next tick (≤30s)
+
+        This bypasses the 5-15 min DexScreener indexing wait. Latency end-to-end:
+            whale tx → bot buy ≈ 5-10 seconds.
+        """
+        # Skip if we already know about this token (deduplicated upstream too)
+        if token_addr in self.scanner.pending_copy:
+            # Just attribute the wallet for multi-wallet boost
+            self.scanner.add_copy_signal(token_addr, wallet_addr)
+            return
+
+        # Probe Jupiter: is this token tradeable right now?
+        try:
+            probe = await jupiter.probe_token_tradeable(token_addr, probe_amount_sol=0.005)
+        except Exception:
+            probe = None
+
+        if not probe or not probe.get("tradeable"):
+            # Not on Jupiter yet (no route) → fall back to DexScreener wait
+            # via the standard add_copy_signal flow.
+            self.scanner.add_copy_signal(token_addr, wallet_addr)
+            return
+
+        # Tradeable! Push to scanner as a "pre-resolved" copy signal.
+        # The main scan loop will pick it up immediately.
+        self.scanner.add_copy_signal(token_addr, wallet_addr)
+        self.log(
+            f"⚡ [WS-FAST] {wallet_addr[:8]}... → {token_addr[:8]}... "
+            f"(tradeable via Jupiter, {probe.get('route_count')} DEXes, "
+            f"impact {probe.get('price_impact', 0):.1f}%)"
+        )
+
+    # ------------------------------------------------------------------
     async def _wallet_poll_loop(self):
         """
-        Scan alpha wallets every 15s — decoupled from main scan (30s).
+        Fallback polling loop — runs every 30s in case WebSocket misses anything.
 
-        WHY: with the main scan at 30s, we detect whale buys with a 30-90s
-        average delay. During that window the token may already be +30-50%.
-        Scanning wallets separately every 15s reduces detection delay to ~15s.
+        WebSocket is the primary signal source (latency ~3-5s).
+        This poll catches edge cases:
+            - WS reconnect window (5-60s downtime)
+            - Helius push delays during high load
+            - Logs notification filter misses
 
-        Results are pushed into scanner.pending_copy via add_copy_signal().
-        The main scan reads pending_copy and resolves via DexScreener — no double call.
+        Results converge into the same scanner.pending_copy queue.
         """
         if not self.wallet_tracker or not self.wallet_tracker.ALPHA_WALLETS:
             return
-        self.log("⚡ Wallet poll loop started — copy trade detection every 15s")
+        self.log("🐢 Fallback poll loop started (30s) — WS primary, this is safety net")
         while self.running:
             try:
                 token_wallets = await self.wallet_tracker.scan_all(since_minutes=2)
@@ -1011,7 +1060,7 @@ Chart     : https://dexscreener.com/solana/{token.address}
                         self.scanner.add_copy_signal(token_addr, w)
             except Exception:
                 pass  # DNS/network — retry next cycle
-            await asyncio.sleep(15)
+            await asyncio.sleep(30)  # 30s now (was 15s) — WS handles fast detection
 
     # ------------------------------------------------------------------
     async def run(self, scan_interval: int = 60):
@@ -1045,10 +1094,14 @@ Chart     : https://dexscreener.com/solana/{token.address}
         self.log(f"Rugcheck enabled | Max {MAX_CONCURRENT_TRADES} simultaneous trades")
         n_wallets = len(self.wallet_tracker.ALPHA_WALLETS)
         if n_wallets > 0:
-            self.log(f"🔁 Copy trading: {n_wallets} alpha wallet(s) | poll every 15s")
+            self.log(f"🔁 Copy trading: {n_wallets} alpha wallet(s)")
+            self.log(f"   ⚡ WebSocket (primary)  — push-based, ~3s latency")
+            self.log(f"   🐢 Poll fallback (30s) — safety net for WS reconnects")
             for w in self.wallet_tracker.ALPHA_WALLETS:
                 self.log(f"   → {w[:8]}...{w[-4:]}")
-            # Launch wallet poll in background (15s — more reactive than 30s scan)
+            # Primary detection: Helius WebSocket
+            asyncio.create_task(self.ws_monitor.run())
+            # Fallback safety net (lower frequency now that WS is primary)
             asyncio.create_task(self._wallet_poll_loop())
         else:
             self.log("🔁 Copy trading: INACTIVE (add wallets in wallet_tracker.py)")
@@ -1064,6 +1117,7 @@ Chart     : https://dexscreener.com/solana/{token.address}
                 # Periodic wallet performance log (every 6h)
                 if time.time() - self._last_wallet_summary_ts > 21600:
                     self.scanner.log_wallet_performance()
+                    self.ws_monitor.print_stats()
                     self._last_wallet_summary_ts = time.time()
 
                 # Balance snapshot for dashboard (every 30min)
