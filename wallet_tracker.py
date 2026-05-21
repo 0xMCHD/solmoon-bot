@@ -32,7 +32,7 @@ class WalletTracker:
 
         # Confirmed strong signals (GMGN.ai vetted)
         "4zb5WFzzAP6UZUva5iXPEz1JbKTU4Z6TC3sNEzLbpv98",  # best signal (Billy +29%)
-        "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
+        # RETIRED 2026-05-21: 4BdKaxN8 — 0/17 resolved (was top historical, now MEV/scalping bot)
         "7xkXams2xqCokfoMyLKUtrKRTXqs9EzyEnkkFVH459YH",
         "CATjstjdDxqxKdrXQ9R8DWF2oZp8jSd2QX2VJ1zQbT91",
         "6bVUHfK6YzdhLEysxb9VHwsNdDvMcYhk1FfSjZ9onvZx",
@@ -40,7 +40,7 @@ class WalletTracker:
         # Added 2026-04-27
         "8MoW9mtbEz6z3gPuAdYb1yWhjCAxQSYqpcTb1CQgN5qb",
         "Ew6qBU7N34gRNgpgUwhJ3PgrtbPYpLYWLBEG5yuQTceD",
-        "7pDhG6NqfzQzw5KvtGXJbVRUh4iTBgYAn68BSKjdMNC1",
+        # RETIRED 2026-05-21: 7pDhG6Nq — 0/5 resolved (cold)
         "FFEjC9MHhpQViBPrD2iU6LmV2hEigyhLJaL7MZUZzyD4",
         "uveKTCxihqgL2E9X6CYBDQoQko69QjtwE4d6FkBFcy1",
         "CVtN7xVV3ed5x6kJfyKL1b57NeLe8BXKoAWzC29D3G8Q",
@@ -57,9 +57,9 @@ class WalletTracker:
         "FRcHp2wrSk2Ej9Y81DFEVJ7U8arL1ki5RX6c49Wa3M8J",  # +161% PnL 7d / 100% WR! / 35tx — smart_degen
         "FWNmzY26FnsmpaWPQQJXQ24PQAyKtDByJz9HMa24s1z5",  # VOLUME BEAST — 5377 trades 30d / 93% WR / $62K profit
         "D1gwKFveaQ2mogvv5dhHNa7cfdcuGQphtfiwe22sm3nL",  # +77% PnL 7d / 57% WR — smart_degen+trojan
-        "HtbXDAE1xX35vXhE3raVuYiZrykWiFWcnDJyy3WLo9So",  # +71% PnL / 511tx 30d — axiom+launchpad_smart
+        # RETIRED 2026-05-21: HtbXDAE1 — 1/22 resolved (5%, very noisy scalper)
         "8FiuwM6FmVKmBLCaJ6QcNScnVw4NuNs7Tt4Skf91saF8",  # BEST CONSISTENCY — 88% WR 7d AND 85% WR 30d
-        "21cutQKXw6opqwAcUfVVSDFbjKjs9NA94cUTfYBy4SZ6",  # 657 trades 30d — axiom+launchpad_smart+padre
+        # RETIRED 2026-05-21: 21cutQKX — 3/23 resolved (13%, also a scalper, paired with HtbXDAE1)
         "ExkBDVdrrN7woPX42v5sfJa7AvHKhAb2uU9Fwzhhokno",  # 965 trades 30d — axiom+launchpad_smart+padre
         "CevfH18c59S1TwPuP3vgLD6W4q1Nf8nRdVNNLHnUMiWp",  # 671 trades 30d / 60% WR 30d — launchpad_smart+padre
 

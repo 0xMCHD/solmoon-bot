@@ -402,20 +402,18 @@ class MemeTrader:
             if token.liquidity_usd < 5_000:   # minimum threshold, anti-honeypot
                 result["reason"] = f"[MOON] Liquidity too low: ${token.liquidity_usd:.0f}"
                 return result
-            # Volume filter — RELAXED if liquidity came from Jupiter probe.
-            # Reason: when Jupiter confirms tradeability but DexScreener still has
-            # liquidity=$0, the token is < 5 min old. It can't possibly have 1h
-            # volume yet — but that doesn't make it dead. Trust the WS+Jupiter signal.
-            # When liquidity comes from DexScreener (token >5min indexed),
-            # we still want $25K minimum to avoid Kirkslop-style dead tokens.
-            volume_threshold = 5_000 if getattr(token, 'liquidity_from_jupiter', False) else 25_000
-            if token.volume_1h < volume_threshold:
-                tag = "fresh (Jupiter)" if getattr(token, 'liquidity_from_jupiter', False) else ""
-                result["reason"] = (
-                    f"[MOON] Volume 1h too low: ${token.volume_1h:.0f} "
-                    f"— dead token or too early {tag}".strip()
-                )
-                return result
+            # Volume filter — strict only for DexScreener-sourced tokens (indexed >5min).
+            # For Jupiter-only tokens (freshly migrated, DexScreener stale):
+            #   - 1h volume CANNOT exist yet (token is < 5 min old)
+            #   - Skip this check entirely; rely on:
+            #       • wallet signal (alpha bought = real interest)
+            #       • rug check (catches honeypots / bad mint authorities)
+            #       • active dump filter (-15% 5min already triggers skip)
+            #       • late entry filter (+60% 5min already triggers skip)
+            if not getattr(token, 'liquidity_from_jupiter', False):
+                if token.volume_1h < 25_000:
+                    result["reason"] = f"[MOON] Volume 1h too low: ${token.volume_1h:.0f} — dead token or too early"
+                    return result
             if token.age_hours > MOON_MAX_AGE_HOURS:
                 result["reason"] = f"[MOON] Token too old: {token.age_hours:.0f}h (max {MOON_MAX_AGE_HOURS}h)"
                 return result
