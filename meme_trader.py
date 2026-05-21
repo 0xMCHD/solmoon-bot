@@ -130,7 +130,13 @@ class RugChecker:
 STATS_FILE = "stats.json"
 BALANCE_HISTORY_FILE = "balance_history.json"   # snapshots for dashboard chart
 BALANCE_SNAPSHOT_INTERVAL = 1800                # 30 min between snapshots
-DAILY_CIRCUIT_BREAKER_PCT = -10.0               # pause 24h if intraday PnL <= -10%
+DAILY_CIRCUIT_BREAKER_PCT = -15.0               # pause 24h if intraday PnL <= -15%
+                                                # (raised from -10% — DNS dropouts during open
+                                                # trades caused false positives because the
+                                                # balance dropped mid-trade and was misread as
+                                                # a closed loss; the new threshold is 1.5×
+                                                # the worst single-trade SL so it only fires
+                                                # on genuine multi-trade losing streaks)
 CIRCUIT_BREAKER_PAUSE_SEC = 86400               # 24h pause after circuit breaker hits
 
 
@@ -1164,16 +1170,24 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     f"check wallet, tokens may be unsold | {self.wins}W/{self.losses}L"
                 )
 
-            # Update daily PnL counter for circuit breaker
-            # Try to fetch new balance to compute realized PnL since trade entry
+            # Update daily PnL counter ONLY when all trades are CLOSED.
+            # Bug context: previous version read balance mid-trade (while tokens were
+            # still held), which under-reports the balance by ~the position size
+            # and falsely triggers the circuit breaker on a tiny actual loss.
+            # By waiting until len(active_trades) == 1 (just this one being closed)
+            # AND popping it first, we ensure balance reflects only closed trades.
+            #
+            # Note: active_trades is popped in the `finally` block right after this,
+            # so we check ≤1 (this trade still in there) and skip if other trades open.
             try:
-                new_bal = await wallet.get_sol_balance(self.pubkey)
-                entry_info = self.active_trades.get(token.address, {})
-                # If we tracked entry balance, compute delta. Otherwise approximate.
-                # Simple approximation: delta vs daily_start_balance + previous daily_pnl
-                if self.daily_start_balance > 0:
-                    realized_today = new_bal - self.daily_start_balance
-                    self.daily_pnl_sol = realized_today
+                # Only update if THIS trade is the last open one
+                if len(self.active_trades) <= 1:
+                    # Brief sleep to let the on-chain settlement reflect in balance
+                    await asyncio.sleep(3)
+                    new_bal = await wallet.get_sol_balance(self.pubkey)
+                    if self.daily_start_balance > 0:
+                        self.daily_pnl_sol = new_bal - self.daily_start_balance
+                # else: another trade is still open → wait for it to close
             except Exception:
                 pass
 
