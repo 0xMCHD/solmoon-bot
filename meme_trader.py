@@ -402,10 +402,19 @@ class MemeTrader:
             if token.liquidity_usd < 5_000:   # minimum threshold, anti-honeypot
                 result["reason"] = f"[MOON] Liquidity too low: ${token.liquidity_usd:.0f}"
                 return result
-            # Minimum volume filter: Kirkslop had $6K vol/h → dead token, SL hit.
-            # $25K minimum = enough liquidity for the copy trade to still be active.
-            if token.volume_1h < 25_000:
-                result["reason"] = f"[MOON] Volume 1h too low: ${token.volume_1h:.0f} — dead token or too early"
+            # Volume filter — RELAXED if liquidity came from Jupiter probe.
+            # Reason: when Jupiter confirms tradeability but DexScreener still has
+            # liquidity=$0, the token is < 5 min old. It can't possibly have 1h
+            # volume yet — but that doesn't make it dead. Trust the WS+Jupiter signal.
+            # When liquidity comes from DexScreener (token >5min indexed),
+            # we still want $25K minimum to avoid Kirkslop-style dead tokens.
+            volume_threshold = 5_000 if getattr(token, 'liquidity_from_jupiter', False) else 25_000
+            if token.volume_1h < volume_threshold:
+                tag = "fresh (Jupiter)" if getattr(token, 'liquidity_from_jupiter', False) else ""
+                result["reason"] = (
+                    f"[MOON] Volume 1h too low: ${token.volume_1h:.0f} "
+                    f"— dead token or too early {tag}".strip()
+                )
                 return result
             if token.age_hours > MOON_MAX_AGE_HOURS:
                 result["reason"] = f"[MOON] Token too old: {token.age_hours:.0f}h (max {MOON_MAX_AGE_HOURS}h)"
@@ -1003,38 +1012,30 @@ Chart     : https://dexscreener.com/solana/{token.address}
 
         Pipeline:
             1. Probe Jupiter to confirm token is tradeable (skip DexScreener wait)
-            2. If tradeable → push to scanner.pending_copy (with wallet attribution)
-            3. The main scan loop picks it up on the next tick (≤30s)
+            2. Push to scanner.pending_copy WITH the Jupiter probe data
+            3. The main scan loop picks it up: uses Jupiter liquidity if DexScreener stale
 
-        This bypasses the 5-15 min DexScreener indexing wait. Latency end-to-end:
-            whale tx → bot buy ≈ 5-10 seconds.
+        Critical : the Jupiter probe data is stored in pending_copy so that when
+        the scanner later builds the MemeCoin, it can use Jupiter's liquidity
+        estimate when DexScreener reports $0 (stale on freshly migrated tokens).
+        This unlocks the most explosive 5-min entry window.
         """
-        # Skip if we already know about this token (deduplicated upstream too)
-        if token_addr in self.scanner.pending_copy:
-            # Just attribute the wallet for multi-wallet boost
-            self.scanner.add_copy_signal(token_addr, wallet_addr)
-            return
-
         # Probe Jupiter: is this token tradeable right now?
         try:
             probe = await jupiter.probe_token_tradeable(token_addr, probe_amount_sol=0.005)
         except Exception:
             probe = None
 
-        if not probe or not probe.get("tradeable"):
-            # Not on Jupiter yet (no route) → fall back to DexScreener wait
-            # via the standard add_copy_signal flow.
-            self.scanner.add_copy_signal(token_addr, wallet_addr)
-            return
+        # Always push the signal (so wallet stats are tracked).
+        # Pass the probe so the scanner can use it later (even None is fine).
+        self.scanner.add_copy_signal(token_addr, wallet_addr, jupiter_probe=probe)
 
-        # Tradeable! Push to scanner as a "pre-resolved" copy signal.
-        # The main scan loop will pick it up immediately.
-        self.scanner.add_copy_signal(token_addr, wallet_addr)
-        self.log(
-            f"⚡ [WS-FAST] {wallet_addr[:8]}... → {token_addr[:8]}... "
-            f"(tradeable via Jupiter, {probe.get('route_count')} DEXes, "
-            f"impact {probe.get('price_impact', 0):.1f}%)"
-        )
+        if probe and probe.get("tradeable"):
+            self.log(
+                f"⚡ [WS-FAST] {wallet_addr[:8]}... → {token_addr[:8]}... "
+                f"(tradeable via Jupiter, {probe.get('route_count')} DEXes, "
+                f"impact {probe.get('price_impact', 0):.2f}%)"
+            )
 
     # ------------------------------------------------------------------
     async def _wallet_poll_loop(self):

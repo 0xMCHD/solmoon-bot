@@ -69,6 +69,10 @@ class MemeCoin:
         # Number of alpha wallets that bought this token (1 = normal signal, 2+ = strong signal)
         self.wallet_hit_count: int = 0
 
+        # Liquidity source flag — True if liquidity_usd comes from Jupiter probe (vs DexScreener)
+        # When True, the token is very fresh (DexScreener hasn't indexed yet) → relax filters
+        self.liquidity_from_jupiter: bool = False
+
     def score(self) -> dict:
         """Compute a quality score for this token."""
         points = 0
@@ -238,23 +242,36 @@ class MemeScanner:
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"[{ts}] [MEME] {msg}")
 
-    def add_copy_signal(self, token_addr: str, wallet_addr: str = ""):
+    def add_copy_signal(self, token_addr: str, wallet_addr: str = "",
+                        jupiter_probe: dict | None = None):
         """
-        Register a copy-trade signal from the background wallet poll.
-        Called by MemeTrader._wallet_poll_loop every 15s.
+        Register a copy-trade signal from the background wallet poll OR the WebSocket.
         Each call can originate from a different wallet for the same token —
         wallet_hit_count then reflects how many whales bought simultaneously.
+
+        Optional jupiter_probe: result of jupiter.probe_token_tradeable() at the
+        time of detection. Used to bypass DexScreener's stale liquidity field on
+        freshly migrated tokens (the most explosive entry window).
         """
         if not token_addr or token_addr in BLACKLISTED_TOKEN_ADDRESSES:
             return
         now = time.time()
         if token_addr not in self.pending_copy:
-            self.pending_copy[token_addr] = {"ts": now, "wallets": set()}
+            self.pending_copy[token_addr] = {
+                "ts": now,
+                "wallets": set(),
+                "jupiter_probe": None,
+                "jupiter_probe_ts": 0,
+            }
             self.log(f"⏳ Copy trade pending DexScreener: {token_addr[:8]}...")
         if wallet_addr:
             self.pending_copy[token_addr]["wallets"].add(wallet_addr)
             # Track that this wallet sent a signal
             self._bump_wallet_stat(wallet_addr, "sent")
+        # Update Jupiter probe (keep the most recent one)
+        if jupiter_probe and jupiter_probe.get("tradeable"):
+            self.pending_copy[token_addr]["jupiter_probe"] = jupiter_probe
+            self.pending_copy[token_addr]["jupiter_probe_ts"] = now
 
     async def fetch_trending(self) -> list[MemeCoin]:
         """Fetch Solana trending tokens on DexScreener (3 sources)."""
@@ -497,6 +514,36 @@ class MemeScanner:
                                         mc.copy_trade = True
                                         info = self.pending_copy.get(mc.address, {})
                                         mc.wallet_hit_count = len(info.get("wallets", set()))
+
+                                        # ── Jupiter probe injection ────────────
+                                        # If DexScreener reports stale/zero liquidity but we
+                                        # have a recent Jupiter probe (<5min), trust Jupiter.
+                                        # This unblocks freshly migrated pump.fun tokens
+                                        # (the most explosive 5-min entry window).
+                                        probe = info.get("jupiter_probe")
+                                        probe_ts = info.get("jupiter_probe_ts", 0)
+                                        probe_fresh = probe and (time.time() - probe_ts) < 300
+                                        if probe_fresh and mc.liquidity_usd < 5_000:
+                                            # Estimate liquidity from price impact (AMM constant product)
+                                            # liq_total ≈ 2 * probe_amount_sol * sol_price / impact_pct
+                                            impact = abs(probe.get("price_impact", 1.0))
+                                            if impact < 0.001:
+                                                impact = 0.001  # cap minimum at 0.1%
+                                            probe_sol = 0.005
+                                            # Approx SOL price $150 (good enough for ordering of magnitude)
+                                            est_liq_usd = 2 * probe_sol * 150 / (impact / 100)
+                                            est_liq_usd = max(est_liq_usd, 5_000)  # floor for safety
+                                            est_liq_usd = min(est_liq_usd, 500_000)  # cap reasonable
+                                            mc.liquidity_usd = est_liq_usd
+                                            mc.liquidity_from_jupiter = True
+                                            self.log(
+                                                f"  💧 {mc.address[:8]}... liq estimated "
+                                                f"${est_liq_usd/1000:.0f}K from Jupiter probe "
+                                                f"(impact {impact:.2f}%, DexScreener stale)"
+                                            )
+                                        else:
+                                            mc.liquidity_from_jupiter = False
+
                                         # Remove from pending if found with sufficient liquidity
                                         if mc.liquidity_usd > 5_000 and mc.address in self.pending_copy:
                                             # Track resolution per wallet that sent the signal
