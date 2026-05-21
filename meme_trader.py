@@ -1051,16 +1051,19 @@ Chart     : https://dexscreener.com/solana/{token.address}
         """
         if not self.wallet_tracker or not self.wallet_tracker.ALPHA_WALLETS:
             return
-        self.log("🐢 Fallback poll loop started (30s) — WS primary, this is safety net")
+        self.log("🐢 Fallback poll loop started (120s) — WS primary, this is the safety net")
         while self.running:
             try:
-                token_wallets = await self.wallet_tracker.scan_all(since_minutes=2)
+                # Look back 3 min to catch anything WS missed during reconnects
+                token_wallets = await self.wallet_tracker.scan_all(since_minutes=3)
                 for token_addr, wallet_list in token_wallets.items():
                     for w in wallet_list:
                         self.scanner.add_copy_signal(token_addr, w)
             except Exception:
                 pass  # DNS/network — retry next cycle
-            await asyncio.sleep(30)  # 30s now (was 15s) — WS handles fast detection
+            # 120s = enough to cover WS reconnect windows (~5-60s typical)
+            # while staying well under Helius free tier 100K req/day quota.
+            await asyncio.sleep(120)
 
     # ------------------------------------------------------------------
     async def run(self, scan_interval: int = 60):
