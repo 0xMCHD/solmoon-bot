@@ -17,6 +17,7 @@ Auto-refreshes every 30 seconds.
 
 import json
 import os
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -87,6 +88,7 @@ def load_json(path, default):
 stats = load_json("stats.json", {})
 history = load_json("balance_history.json", [])
 wallet_stats = load_json("wallet_signal_stats.json", {})
+trades_history = load_json("trades_history.json", [])
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -142,6 +144,66 @@ with m4:
     st.metric("🎯 Win Rate", f"{win_rate:.0f}%")
 with m5:
     st.metric("📅 Day", f"{days_elapsed} / 45")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Recent streak — last N trades visualized
+# ─────────────────────────────────────────────────────────────────────
+st.markdown("---")
+col_streak, col_pnl_today = st.columns([2, 1])
+with col_streak:
+    st.subheader("🔥 Recent streak")
+    if trades_history:
+        last_n = trades_history[-15:]
+        streak_emojis = []
+        for t in last_n:
+            r = t.get("result", "")
+            if r == "WIN":
+                streak_emojis.append("🟢")
+            elif r == "LOSS":
+                streak_emojis.append("🔴")
+            else:
+                streak_emojis.append("⚪")
+        streak_str = " ".join(streak_emojis)
+        st.markdown(
+            f"<div style='font-size:1.8rem; letter-spacing:4px;'>{streak_str}</div>"
+            f"<div style='color:#B6BCC6; margin-top:4px;'>"
+            f"Last {len(last_n)} trades · oldest → newest"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        # Current streak count (consecutive same-result at end)
+        if streak_emojis:
+            current = streak_emojis[-1]
+            count = 1
+            for e in reversed(streak_emojis[:-1]):
+                if e == current:
+                    count += 1
+                else:
+                    break
+            if current == "🟢":
+                st.markdown(f"**🔥 {count} win streak in progress**")
+            elif current == "🔴":
+                st.markdown(f"**❄️ {count} loss streak — eyes open**")
+    else:
+        st.info("No trade history yet. Will populate after the next completed trade.")
+
+with col_pnl_today:
+    st.subheader("📅 Today")
+    daily_pnl = stats.get("daily_pnl_sol", 0.0)
+    daily_start = stats.get("daily_start_balance", 0.0)
+    daily_pct = (daily_pnl / daily_start * 100) if daily_start > 0 else 0
+    # Use bigger live delta from balance history if available
+    if history and daily_start > 0:
+        live_delta = history[-1]["balance_sol"] - daily_start
+        live_pct = (live_delta / daily_start * 100)
+        st.metric(
+            "Today's PnL",
+            f"{live_delta:+.4f} SOL",
+            f"{live_pct:+.2f}%",
+        )
+    else:
+        st.metric("Today's PnL", f"{daily_pnl:+.4f} SOL", f"{daily_pct:+.2f}%")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -295,41 +357,60 @@ else:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Today's status — circuit breaker & daily PnL
+# Trade history table
+# ─────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("📜 Recent trades")
+if trades_history:
+    rows = []
+    for t in reversed(trades_history[-30:]):  # newest first
+        r = t.get("result", "")
+        emoji = "🟢 WIN" if r == "WIN" else ("🔴 LOSS" if r == "LOSS" else "⚪ UNCERTAIN")
+        pnl_sol = t.get("pnl_sol")
+        pnl_str = f"{pnl_sol:+.4f}" if pnl_sol is not None else "—"
+        rows.append({
+            "Time": t.get("iso_close", "")[:19].replace("T", " "),
+            "Token": t.get("symbol", "?"),
+            "Mode": t.get("mode", "?"),
+            "Wallet hits": t.get("wallet_hits", 0),
+            "Result": emoji,
+            "PnL SOL": pnl_str,
+        })
+    df_trades = pd.DataFrame(rows)
+    st.dataframe(df_trades, use_container_width=True, hide_index=True, height=350)
+else:
+    st.info(
+        "📭 No trade history yet — this table populates after the bot completes "
+        "its first trade with the new logging. Existing trades from before this "
+        "update aren't shown."
+    )
+
+# ─────────────────────────────────────────────────────────────────────
+# Bot info (compact footer block)
 # ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
 col_a, col_b = st.columns(2)
 with col_a:
-    st.subheader("📅 Today")
-    daily_pnl = stats.get("daily_pnl_sol", 0.0)
-    daily_start = stats.get("daily_start_balance", 0.0)
-    daily_pct = (daily_pnl / daily_start * 100) if daily_start > 0 else 0
-    st.metric(
-        "Daily PnL",
-        f"{daily_pnl:+.4f} SOL",
-        f"{daily_pct:+.2f}%",
-    )
-    breaker_threshold = -10.0
-    st.write(
-        f"Circuit breaker triggers at **{breaker_threshold}%** intraday. "
-        f"Current: **{daily_pct:+.2f}%**"
-    )
-    if daily_pct <= breaker_threshold:
-        st.error("🚨 Circuit breaker should fire!")
-    elif daily_pct <= -5:
-        st.warning("⚠️ Approaching circuit breaker")
+    st.subheader("📊 Session stats")
+    st.write(f"**Total trades:** {total_trades}")
+    st.write(f"**Win rate:** {win_rate:.0f}% ({wins}W / {losses}L)")
+    cb_until = stats.get("circuit_breaker_until", 0)
+    if cb_until > time.time():
+        h = int((cb_until - time.time()) / 3600)
+        st.error(f"🛑 Circuit breaker active — {h}h remaining")
     else:
-        st.success("✅ Safe zone")
+        st.success("✅ Circuit breaker inactive")
 
 with col_b:
-    st.subheader("📜 Bot info")
-    st.write(f"**Total trades:** {total_trades}")
+    st.subheader("📡 Bot info")
     last_update = stats.get("last_updated_human", "—")
     st.write(f"**Last bot update:** {last_update}")
     if history:
         snapshots_taken = len(history)
         first_iso = history[0].get("iso", "—")[:19]
         st.write(f"**Balance snapshots:** {snapshots_taken} (since {first_iso})")
+    if trades_history:
+        st.write(f"**Trades logged:** {len(trades_history)}")
 
 
 # ─────────────────────────────────────────────────────────────────────

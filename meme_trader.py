@@ -130,6 +130,7 @@ class RugChecker:
 # ---------------------------------------------------------------------------
 STATS_FILE = "stats.json"
 BALANCE_HISTORY_FILE = "balance_history.json"   # snapshots for dashboard chart
+TRADES_LOG_FILE = "trades_history.json"         # per-trade history for dashboard
 BALANCE_SNAPSHOT_INTERVAL = 1800                # 30 min between snapshots
 DAILY_CIRCUIT_BREAKER_PCT = -50.0               # effectively disabled
                                                 # WHY: daily_pnl is computed from balance delta,
@@ -227,6 +228,24 @@ class MemeTrader:
                 json.dump(data, f, indent=2)
         except Exception as e:
             self.log(f"⚠️ Stats save error: {e}")
+
+    def _append_trade_log(self, entry: dict):
+        """Append a trade record to TRADES_LOG_FILE (last 200 trades kept)."""
+        import json, os
+        history = []
+        if os.path.exists(TRADES_LOG_FILE):
+            try:
+                with open(TRADES_LOG_FILE) as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+        history.append(entry)
+        history = history[-200:]   # bounded
+        try:
+            with open(TRADES_LOG_FILE, "w") as f:
+                json.dump(history, f, indent=2)
+        except Exception:
+            pass
 
     async def _snapshot_balance(self):
         """Append a balance snapshot to history (for dashboard chart). Throttled."""
@@ -1208,23 +1227,55 @@ Chart     : https://dexscreener.com/solana/{token.address}
 
     # ------------------------------------------------------------------
     async def _handle_trade(self, token: MemeCoin, entry_price: float, moon_mode: bool = False):
+        trade_start_ts = self.active_trades.get(token.address, {}).get("entry_time", time.time())
+        # Snapshot balance BEFORE close to compute realized PnL
+        try:
+            bal_before = await wallet.get_sol_balance(self.pubkey)
+        except Exception:
+            bal_before = None
         try:
             result = await self.monitor_and_sell(token, entry_price, moon_mode=moon_mode)
+            # Determine result tag
             if result is True:
                 self.wins += 1
+                result_tag = "WIN"
                 self.log(f"✅ WIN {token.symbol} | {self.wins}W/{self.losses}L")
             elif result is False:
                 self.losses += 1
+                result_tag = "LOSS"
                 # 24h blacklist — avoid re-entering on a token in distribution
                 self.sl_blacklist[token.address] = time.time() + SL_BLACKLIST_HOURS * 3600
                 self.log(f"❌ LOSS {token.symbol} → blacklist {SL_BLACKLIST_HOURS}h | {self.wins}W/{self.losses}L")
             else:
+                result_tag = "UNCERTAIN"
                 # None = sell failed (network/DNS) OR neutral timeout
                 # Tokens may still be in the wallet → critical warning
                 self.log(
                     f"⚠️ SELL UNCERTAIN {token.symbol} — "
                     f"check wallet, tokens may be unsold | {self.wins}W/{self.losses}L"
                 )
+
+            # Per-trade history log (used by the dashboard for trade table + streak)
+            try:
+                await asyncio.sleep(2)
+                bal_after = await wallet.get_sol_balance(self.pubkey)
+                pnl_sol = (bal_after - bal_before) if bal_before is not None else None
+                self._append_trade_log({
+                    "ts_open": trade_start_ts,
+                    "ts_close": time.time(),
+                    "iso_close": datetime.now().isoformat(),
+                    "symbol": token.symbol,
+                    "address": token.address,
+                    "mode": "MOON" if moon_mode else "NORMAL",
+                    "entry_price": entry_price,
+                    "result": result_tag,
+                    "wallet_hits": getattr(token, "wallet_hit_count", 0),
+                    "bal_before": bal_before,
+                    "bal_after": bal_after,
+                    "pnl_sol": pnl_sol,
+                })
+            except Exception:
+                pass
 
             # Update daily PnL counter ONLY when all trades are CLOSED.
             # Bug context: previous version read balance mid-trade (while tokens were
