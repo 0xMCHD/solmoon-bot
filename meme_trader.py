@@ -15,11 +15,14 @@ from wallet_websocket import WebSocketMonitor
 # ---------------------------------------------------------------------------
 # Position parameters
 # ---------------------------------------------------------------------------
-MEME_MAX_POSITION_SOL   = 0.08    # 0.08 SOL per trade — capital preservation
+MEME_MAX_POSITION_SOL   = 0.015   # standard MOON (multi-wallet, not ultra-early)
+ULTRA_EARLY_POSITION_SOL = 0.025  # ULTRA_EARLY tier — bigger when jackpot conditions met
 MEME_TAKE_PROFIT_PCT    = 0.40    # final TP +40%
-MEME_STOP_LOSS_PCT      = 0.15    # SL -15%
-MEME_TIMEOUT_SECONDS    = 2700    # 45 min max
-MAX_CONCURRENT_TRADES   = 2       # max 2 positions — 36% capital exposed
+MEME_STOP_LOSS_PCT      = 0.15    # SL -15% (standard MOON)
+ULTRA_EARLY_STOP_LOSS   = 0.25    # SL -25% for ULTRA_EARLY (accept variance for asymmetric upside)
+MEME_TIMEOUT_SECONDS    = 2700    # 45 min max (standard MOON)
+# ULTRA_EARLY has NO timeout — rides until trailing stop / SL / manual
+MAX_CONCURRENT_TRADES   = 1       # focus mode — 1 trade at a time
 
 # Partial exit — triggers earlier because we enter higher into the pump
 PARTIAL_SELL_TRIGGER    = 0.15    # sell 50% of the position at +15% (was +20%)
@@ -184,6 +187,35 @@ class MemeTrader:
     def log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"[{ts}] [MEME-TRADER] {msg}")
+
+    # ------------------------------------------------------------------
+    # ULTRA_EARLY classification — the jackpot tier
+    # ------------------------------------------------------------------
+    @staticmethod
+    def is_ultra_early(token) -> bool:
+        """
+        ULTRA_EARLY = our highest-conviction tier.
+
+        Conditions:
+            1. Liquidity sourced from Jupiter probe (DexScreener still stale)
+               → token is < 5 min old, freshly migrated from pump.fun
+            2. 2+ alpha wallets bought simultaneously
+               → multi-whale validation, very strong signal
+
+        Tokens that qualify get:
+            - Bigger position size (0.025 SOL)
+            - NO timeout (ride until trailing or SL)
+            - Loose trailing (-12%) to capture moonshots
+            - TP tiers at +100%, +300%, +1000% (lock profits progressively)
+            - Loose SL (-25%) to allow variance for asymmetric upside
+        """
+        if not getattr(token, 'copy_trade', False):
+            return False
+        if not getattr(token, 'liquidity_from_jupiter', False):
+            return False
+        if getattr(token, 'wallet_hit_count', 0) < 2:
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Stats persistence — survives bot restarts
@@ -410,9 +442,19 @@ class MemeTrader:
             result["ok"] = True
             return result
 
-        # ── MOON MODE (copy trade): relaxed filters ───────────────────────
-        # We trust the whale — only rug check + position check are active.
+        # ── MOON MODE (copy trade): MULTI-WALLET REQUIRED ──────────────────
+        # Strategic redesign 2026-05-25: single-wallet MOON was generating
+        # mass losses (mostly MEV/scalping copies that go to zero).
+        # New rule: require 2+ wallet hits OR ultra-early Jupiter validation.
         if moon_mode:
+            ultra_early = self.is_ultra_early(token)
+            wallet_hits = getattr(token, 'wallet_hit_count', 0)
+            if not ultra_early and wallet_hits < 2:
+                result["reason"] = (
+                    f"[MOON] Single-wallet signal (hits={wallet_hits}) "
+                    f"— rejected. Require 2+ wallets OR ultra-early."
+                )
+                return result
             if token.price_usd <= 0 or token.price_usd < 1e-10:
                 # 1e-10 = price below DexScreener precision (displays $0.00000000)
                 # monitor_and_sell can't compute a correct PnL → entry refused
@@ -510,7 +552,15 @@ class MemeTrader:
             result["ok"] = True
             return result
 
-        # ── NORMAL MODE (scanner): full filters ───────────────────────────
+        # ── NORMAL MODE (scanner): DISABLED 2026-05-25 ────────────────────
+        # NORMAL was 1W/4L over the test period. Scanner finds tokens that
+        # have already pumped — by the time we arrive, the local top is in.
+        # We focus 100% on copy-trade MOON with multi-wallet validation.
+        # Re-enable only after we can prove an edge in paper mode.
+        result["reason"] = "[NORMAL] Scanner mode disabled — focus on multi-wallet MOON only"
+        return result
+
+        # (legacy code below — kept for reference, never reached)
         if token.price_usd < 1e-10:
             result["reason"] = f"Price too small: ${token.price_usd:.2e} (DexScreener precision insufficient)"
             return result
@@ -664,18 +714,16 @@ Chart     : https://dexscreener.com/solana/{token.address}
         is_moon = getattr(token, 'copy_trade', False) or getattr(token, 'new_listing', False)
         buy_slippage = 500 if is_moon else 150
 
-        # Dynamic position size based on signal strength (wallet_hit_count)
-        # 3+ wallets simultaneously = exceptional signal → bet more
-        # Scanner alone = weak signal → base position
-        wallet_hits = getattr(token, 'wallet_hit_count', 0)
-        if wallet_hits >= 3:
-            position_sol = POSITION_BOOST_3W_SOL
-            self.log(f"  💰 Position boosted to {position_sol} SOL ({wallet_hits} simultaneous wallets)")
-        elif wallet_hits >= 2:
-            position_sol = POSITION_BOOST_2W_SOL
-            self.log(f"  💰 Position boosted to {position_sol} SOL ({wallet_hits} simultaneous wallets)")
+        # Dynamic position size — ULTRA_EARLY tier gets bigger
+        # ULTRA_EARLY = multi-wallet + Jupiter-fresh = highest conviction
+        # Standard MOON = multi-wallet but not ultra-early = smaller bet
+        if self.is_ultra_early(token):
+            position_sol = ULTRA_EARLY_POSITION_SOL
+            self.log(f"  🚀 ULTRA_EARLY {position_sol} SOL — multi-wallet + Jupiter-fresh = jackpot tier")
         else:
-            position_sol = POSITION_BASE_SOL
+            position_sol = MEME_MAX_POSITION_SOL
+            wallet_hits = getattr(token, 'wallet_hit_count', 0)
+            self.log(f"  🌙 STANDARD_MOON {position_sol} SOL ({wallet_hits} wallets)")
 
         position_lamports = int(position_sol * config.LAMPORTS_PER_SOL)
         try:
@@ -812,15 +860,41 @@ Chart     : https://dexscreener.com/solana/{token.address}
     async def monitor_and_sell(self, token: MemeCoin, entry_price: float,
                                moon_mode: bool = False):
         """
-        Normal strategy : partial exit +20% → trailing -5% → TP +40% → SL -15%
-        MOON strategy (copy trade): no partial exit, no fixed TP,
-                                     trailing -8% only → ride the mega pump
+        3 tier strategies :
+
+        ULTRA_EARLY (jackpot tier):
+            - NO timeout, loose trailing -12%, loose SL -25%
+            - Partial TPs at +100%, +300%, +1000% (locks moonshot profits)
+            - Designed to ride freshly-migrated multi-wallet tokens to 10x
+
+        Standard MOON (copy trade, multi-wallet):
+            - Existing strategy: trailing -8%, partial TPs +50%/+100%
+            - 45 min timeout
+
+        Normal (scanner): DISABLED — see validate_entry.
         """
+        ultra_early = self.is_ultra_early(token)
+
         # Mode-specific parameters
-        trailing_dist = MOON_TRAILING_DISTANCE if moon_mode else TRAILING_DISTANCE_PCT
-        tp_price      = float('inf') if moon_mode else entry_price * (1 + MEME_TAKE_PROFIT_PCT)
-        sl_price      = entry_price * (1 - MEME_STOP_LOSS_PCT)
-        partial_px    = float('inf') if moon_mode else entry_price * (1 + PARTIAL_SELL_TRIGGER)
+        if ultra_early:
+            trailing_dist = 0.12              # Loose -12% to let it run
+            sl_price      = entry_price * (1 - ULTRA_EARLY_STOP_LOSS)
+            tp_price      = float('inf')      # No fixed TP, partial TPs handle it
+            partial_px    = float('inf')      # No NORMAL-style partial
+            timeout_secs  = float('inf')      # NO TIMEOUT — ride forever
+        elif moon_mode:
+            trailing_dist = MOON_TRAILING_DISTANCE
+            sl_price      = entry_price * (1 - MEME_STOP_LOSS_PCT)
+            tp_price      = float('inf')
+            partial_px    = float('inf')
+            timeout_secs  = MEME_TIMEOUT_SECONDS
+        else:
+            trailing_dist = TRAILING_DISTANCE_PCT
+            tp_price      = entry_price * (1 + MEME_TAKE_PROFIT_PCT)
+            sl_price      = entry_price * (1 - MEME_STOP_LOSS_PCT)
+            partial_px    = entry_price * (1 + PARTIAL_SELL_TRIGGER)
+            timeout_secs  = MEME_TIMEOUT_SECONDS
+
         start_time    = time.time()
 
         partial_sold    = False
@@ -857,12 +931,21 @@ Chart     : https://dexscreener.com/solana/{token.address}
         moon_tp1_done = False   # 25% sold at +50%
         moon_tp2_done = False   # 25% sold at +100%
 
+        # ULTRA_EARLY TPs — jackpot tier locks profits at exponential milestones
+        # +100% → lock 30% (already doubled, take some off)
+        # +300% → lock 30% more (4x, lock half the trade)
+        # +1000% → lock 20% (10x, only 20% remains for the dream)
+        # Remaining 20% rides the loose -12% trailing for the 50-100x dream
+        ue_tp1_done = False
+        ue_tp2_done = False
+        ue_tp3_done = False
+
         while True:
             # ── Timeout: disabled if trailing active AND position profitable ──
             # SAM case: cut at +21.6% while trailing SL was managing exit.
             # If trailing_active=True and price > entry, let the trailing decide.
             elapsed_total = time.time() - start_time
-            if elapsed_total >= MEME_TIMEOUT_SECONDS:
+            if elapsed_total >= timeout_secs:
                 in_profit = last_known_price is not None and last_known_price > entry_price
                 if trailing_active and in_profit:
                     if time.time() - timeout_log_ts > 60:  # log 1x/min max
@@ -934,23 +1017,43 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     partial_sold = True
                     self.log(f"  ✅ 50% secured | remaining rides with trailing stop")
 
-                # ── PARTIAL TPs in MOON mode (lesson from Cap +421%) ──────
-                # +50% : sell 25% (irreversible win — trade is now risk-free)
-                # +100%: sell 25% more (de-risk further, ride the 50% rest)
-                if moon_mode and not moon_tp1_done and pnl_pct >= 50:
+                # ── ULTRA_EARLY tiered TPs (jackpot mode) ──────────────────
+                # Lock profits at exponential milestones to ride the moonshot
+                if ultra_early:
+                    if not ue_tp1_done and pnl_pct >= 100:
+                        self.log(f"  🚀 UE TP1 {token.symbol} +{pnl_pct:.1f}% (doubled!) — locking 30%")
+                        sold_ok = await self._sell_with_retry(token, ratio=0.30)
+                        if sold_ok:
+                            ue_tp1_done = True
+                            self.log(f"  ✅ 30% locked at +100% | 70% riding for the moon")
+                    if ue_tp1_done and not ue_tp2_done and pnl_pct >= 300:
+                        # 30% of remaining 70% ≈ 0.43 ratio
+                        self.log(f"  🚀 UE TP2 {token.symbol} +{pnl_pct:.1f}% (4x!) — locking 30% more")
+                        sold_ok = await self._sell_with_retry(token, ratio=0.43)
+                        if sold_ok:
+                            ue_tp2_done = True
+                            self.log(f"  ✅ Total 60% locked | 40% riding for 10x+")
+                    if ue_tp2_done and not ue_tp3_done and pnl_pct >= 1000:
+                        # 20% of remaining 40% ≈ 0.50 ratio
+                        self.log(f"  🚀🚀 UE TP3 {token.symbol} +{pnl_pct:.1f}% (10x!!!) — locking 20%")
+                        sold_ok = await self._sell_with_retry(token, ratio=0.50)
+                        if sold_ok:
+                            ue_tp3_done = True
+                            self.log(f"  ✅ Total 80% locked | 20% riding for the dream")
+
+                # ── STANDARD MOON TPs (multi-wallet, not ultra-early) ──────
+                elif moon_mode and not moon_tp1_done and pnl_pct >= 50:
                     self.log(f"  🌙 MOON TP1 {token.symbol} +{pnl_pct:.1f}% — locking 25%")
-                    # ratio=0.25 of REMAINING balance (which is 100% at this point)
                     sold_ok = await self._sell_with_retry(token, ratio=0.25)
                     if sold_ok:
                         moon_tp1_done = True
                         self.log(f"  ✅ 25% locked at +50% | 75% riding")
-                if moon_mode and moon_tp1_done and not moon_tp2_done and pnl_pct >= 100:
+                if moon_mode and not ultra_early and moon_tp1_done and not moon_tp2_done and pnl_pct >= 100:
                     self.log(f"  🌙 MOON TP2 {token.symbol} +{pnl_pct:.1f}% — locking 25% more")
-                    # We're now selling 25% of what's left (75%) → that's 0.25/0.75 ≈ 0.33 of remaining
                     sold_ok = await self._sell_with_retry(token, ratio=0.333)
                     if sold_ok:
                         moon_tp2_done = True
-                        self.log(f"  ✅ Total 50% locked (25% @ +50%, 25% @ +100%) | 50% moonshot riding")
+                        self.log(f"  ✅ Total 50% locked | 50% moonshot riding")
 
                 # ── TRAILING ACTIVATION ──────────────────────────────────
                 if not trailing_active and pnl_pct >= TRAILING_ACTIVATE_PCT * 100:
