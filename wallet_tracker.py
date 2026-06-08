@@ -53,20 +53,27 @@ class WalletTracker:
         "5d3jQcuUvsuHyZkhdp78FFqc7WogrzZpTtec1X9VNkuE",  # +127% PnL / 55% WR / 37tx — $30K / kol+smart_degen
 
         # Added 2026-05-13 (curated from GMGN.ai 7d+30d cross-validation)
-        "74oNN9VfJv2V2SJf4RFSiKPKbrgyMdz7agkaeikRSgm5",  # +319% PnL 7d / 68% WR / 388tx 30d — axiom+launchpad_smart
+        # RETIRED 2026-05-28: 74oNN9Vf — 0/1 resolved (dormant)
         "FRcHp2wrSk2Ej9Y81DFEVJ7U8arL1ki5RX6c49Wa3M8J",  # +161% PnL 7d / 100% WR! / 35tx — smart_degen
         "FWNmzY26FnsmpaWPQQJXQ24PQAyKtDByJz9HMa24s1z5",  # VOLUME BEAST — 5377 trades 30d / 93% WR / $62K profit
-        "D1gwKFveaQ2mogvv5dhHNa7cfdcuGQphtfiwe22sm3nL",  # +77% PnL 7d / 57% WR — smart_degen+trojan
+        "D1gwKFveaQ2mogvv5dhHNa7cfdcuGQphtfiwe22sm3nL",  # +77% PnL 7d / 57% WR — VALIDATED LIVE 87% resolve
         # RETIRED 2026-05-21: HtbXDAE1 — 1/22 resolved (5%, very noisy scalper)
-        "8FiuwM6FmVKmBLCaJ6QcNScnVw4NuNs7Tt4Skf91saF8",  # BEST CONSISTENCY — 88% WR 7d AND 85% WR 30d
+        "8FiuwM6FmVKmBLCaJ6QcNScnVw4NuNs7Tt4Skf91saF8",  # BEST CONSISTENCY — 88% WR 7d / VALIDATED LIVE 83% resolve
         # RETIRED 2026-05-21: 21cutQKX — 3/23 resolved (13%, also a scalper, paired with HtbXDAE1)
-        "ExkBDVdrrN7woPX42v5sfJa7AvHKhAb2uU9Fwzhhokno",  # 965 trades 30d — axiom+launchpad_smart+padre
+        # RETIRED 2026-05-28: ExkBDVdr — 11/91 resolved (12%, high volume noise)
         "CevfH18c59S1TwPuP3vgLD6W4q1Nf8nRdVNNLHnUMiWp",  # 671 trades 30d / 60% WR 30d — launchpad_smart+padre
 
         # Added 2026-05-19 (Day 0 of Personal Challenge — fresh GMGN scrape)
         "7S3E2L25kr6oN2cMP2GQ5tMEfg8jwcmoYo35vvv8rxhW",  # TOP — +118% PnL 7d / 76% WR / 83tx / $12.8K — axiom+smart_degen
-        "Gf2wYM2k5ojfPzN5Uqi3mbP1nWEdZhhzMyDBsKrHA3kC",  # +62% PnL 7d / 60% WR + 1d momentum +108% — launchpad_smart+padre
+        # RETIRED 2026-05-28: Gf2wYM2k — 4/40 resolved (10%, cold)
         "THXcGyTMLSKWmvpDpdgL8G224xfMXksCfA29LBoJfUJ",   # +71% PnL 7d / 65% WR / 90tx — axiom+bullx+smart_degen
+
+        # Added 2026-05-28 (Week 2 refresh — fresh GMGN scrape after cold-pruning)
+        "6fm83LbV26HB4hkmzTzZJhsLv2b6f9tuLWkoMYoHerFy",  # ⭐ BEST CONSISTENCY — 85% WR 7d / 89% WR 30d / 161 tx 30d — smart_degen
+        "AU73C47eNaF5yhpAgB2CtYqPxREGsXQkSsbqgahEYW6h",  # ⭐ TOP RETURNS — +146% PnL 7d / +100% PnL 30d / 72% WR — smart_degen
+        "8p4FzY2KRwoWzaWCuYuBXgSPDNnjr9gian2hpNwwCTFs",  # ⭐ UNMATCHED WR — 100% WR 7d / 95% WR 30d / 217 tx — photon+smart_degen
+        "EW1BMaF3AUnu9anjUmu8p3EY5F33ZhMESi7V2DJHNgNw",  # +131% PnL 7d / 75% WR / 336 tx 30d — axiom+smart_degen
+        "9iaawVBEsFG35PSwd4PahwT8fYNQe9XYuRdWm872dUqY",  # +64% PnL 7d / 58% WR / 91 tx — KOL + padre + top_followed
     ]
 
     def __init__(self, rpc_url: str):
