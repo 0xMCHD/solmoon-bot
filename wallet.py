@@ -87,6 +87,72 @@ def sign_transaction(swap_tx_base64: str, keypair: Keypair) -> str:
     return base64.b64encode(result).decode("utf-8")
 
 
+async def check_mint_authority(mint: str) -> dict:
+    """
+    On-chain mint safety check — reads the token mint account directly.
+
+    Faster and more reliable than rugcheck.xyz (which lags/times out on
+    fresh tokens — exactly the ones we target in ULTRA_EARLY).
+
+    Two killer red flags:
+        - freezeAuthority != null → dev can FREEZE your token account,
+          making your sell impossible (= a form of honeypot)
+        - mintAuthority != null   → dev can MINT infinite new tokens,
+          diluting holders to zero
+
+    A safe memecoin has BOTH renounced (= null).
+
+    Returns dict:
+        safe             : bool — both authorities renounced
+        reason           : str
+        freeze_authority : str | None
+        mint_authority   : str | None
+        checked          : bool — False if the RPC call failed (don't block on error)
+    """
+    result = {
+        "safe": False, "reason": "", "freeze_authority": None,
+        "mint_authority": None, "checked": False,
+    }
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getAccountInfo",
+        "params": [mint, {"encoding": "jsonParsed"}],
+    }
+    _timeout = httpx.Timeout(connect=3.0, read=6.0, write=6.0, pool=6.0)
+    try:
+        async with httpx.AsyncClient(timeout=_timeout) as client:
+            resp = await client.post(config.RPC_URL, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        result["reason"] = f"RPC error: {type(e).__name__} (not blocking)"
+        return result  # checked=False → caller decides (we don't block on RPC failure)
+
+    value = data.get("result", {}).get("value")
+    if not value:
+        result["reason"] = "mint account not found"
+        return result
+
+    info = value.get("data", {}).get("parsed", {}).get("info", {})
+    freeze_auth = info.get("freezeAuthority")
+    mint_auth = info.get("mintAuthority")
+    result["freeze_authority"] = freeze_auth
+    result["mint_authority"] = mint_auth
+    result["checked"] = True
+
+    if freeze_auth is not None:
+        result["reason"] = "🧊 FREEZE AUTHORITY active — dev can freeze your sell"
+        return result
+    if mint_auth is not None:
+        result["reason"] = "🖨️ MINT AUTHORITY active — infinite dilution risk"
+        return result
+
+    result["safe"] = True
+    result["reason"] = "ok — both authorities renounced"
+    return result
+
+
 async def get_token_balance(pubkey: str, mint: str) -> int:
     """Fetch the actual SPL token balance (raw units)."""
     payload = {

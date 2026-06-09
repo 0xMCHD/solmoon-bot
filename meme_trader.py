@@ -23,6 +23,8 @@ ULTRA_EARLY_STOP_LOSS   = 0.25    # SL -25% for ULTRA_EARLY (accept variance for
 MEME_TIMEOUT_SECONDS    = 2700    # 45 min max (standard MOON)
 # ULTRA_EARLY has NO timeout — rides until trailing stop / SL / manual
 MAX_CONCURRENT_TRADES   = 1       # focus mode — 1 trade at a time
+MAX_WHALE_PREMIUM       = 0.15    # only copy if current price ≤ whale entry +15%
+                                  # above that, we'd be buying the whale's exit liquidity
 
 # Partial exit — triggers earlier because we enter higher into the pump
 PARTIAL_SELL_TRIGGER    = 0.15    # sell 50% of the position at +15% (was +20%)
@@ -510,6 +512,41 @@ class MemeTrader:
             if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
                 result["reason"] = f"Max {MAX_CONCURRENT_TRADES} simultaneous trades reached"
                 return result
+
+            # ══ ON-CHAIN SAFETY GATES (fast, reliable, run BEFORE rugcheck) ══
+            # These two catch the honeypots/rugs that rugcheck.xyz misses on
+            # fresh tokens — the exact -100% losses we saw in the trade log.
+
+            # Gate 1: Mint/Freeze authority (1 RPC call, ~0.5s)
+            try:
+                auth = await asyncio.wait_for(
+                    wallet.check_mint_authority(token.address), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                auth = {"safe": False, "checked": False, "reason": "auth check timeout"}
+            if auth.get("checked") and not auth.get("safe"):
+                self.log(f"  [MOON] ⛔ {token.symbol}: {auth['reason']}")
+                result["reason"] = f"[MOON] {auth['reason']}"
+                return result
+
+            # Gate 2: Honeypot round-trip simulation (2 Jupiter calls, ~1-2s)
+            try:
+                hp = await asyncio.wait_for(
+                    jupiter.simulate_round_trip(token.address, probe_amount_sol=0.01),
+                    timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                hp = {"safe": False, "reason": "honeypot sim timeout"}
+            if not hp.get("safe"):
+                self.log(f"  [MOON] 🍯 {token.symbol}: {hp['reason']}")
+                result["reason"] = f"[MOON] Honeypot/exit risk: {hp['reason']}"
+                return result
+            self.log(
+                f"  [MOON] ✅ Round-trip clean ({token.symbol}): "
+                f"loss {hp['round_trip_loss']*100:.1f}%, "
+                f"sell impact {hp['sell_impact']:.1f}%"
+            )
+
             self.log(f"[MOON] 🌙 Rug check {token.symbol} (copied from alpha wallet)...")
             try:
                 # Hard deadline 8s — a slow rug check must not block the scan loop
@@ -714,16 +751,27 @@ Chart     : https://dexscreener.com/solana/{token.address}
         is_moon = getattr(token, 'copy_trade', False) or getattr(token, 'new_listing', False)
         buy_slippage = 500 if is_moon else 150
 
-        # Dynamic position size — ULTRA_EARLY tier gets bigger
+        # Dynamic position size — tier base × wallet-quality multiplier (#7)
         # ULTRA_EARLY = multi-wallet + Jupiter-fresh = highest conviction
         # Standard MOON = multi-wallet but not ultra-early = smaller bet
         if self.is_ultra_early(token):
-            position_sol = ULTRA_EARLY_POSITION_SOL
-            self.log(f"  🚀 ULTRA_EARLY {position_sol} SOL — multi-wallet + Jupiter-fresh = jackpot tier")
+            base_sol = ULTRA_EARLY_POSITION_SOL
+            tier = "🚀 ULTRA_EARLY"
         else:
-            position_sol = MEME_MAX_POSITION_SOL
-            wallet_hits = getattr(token, 'wallet_hit_count', 0)
-            self.log(f"  🌙 STANDARD_MOON {position_sol} SOL ({wallet_hits} wallets)")
+            base_sol = MEME_MAX_POSITION_SOL
+            tier = "🌙 STANDARD_MOON"
+
+        # #7 — scale by the best contributing wallet's profit-quality score [0.5, 1.5]
+        source_wallets = getattr(token, 'source_wallets', []) or []
+        quality = 1.0
+        if source_wallets:
+            quality = max(self.scanner.wallet_quality(w) for w in source_wallets)
+        position_sol = round(base_sol * quality, 4)
+        # Never exceed 25% of current capital on a single trade (safety)
+        # (uses last known balance; falls back to base if unknown)
+        wallet_hits = getattr(token, 'wallet_hit_count', 0)
+        q_tag = f" ×{quality:.2f} quality" if abs(quality - 1.0) > 0.01 else ""
+        self.log(f"  {tier} {position_sol} SOL ({wallet_hits} wallets{q_tag})")
 
         position_lamports = int(position_sol * config.LAMPORTS_PER_SOL)
         try:
@@ -1126,25 +1174,48 @@ Chart     : https://dexscreener.com/solana/{token.address}
         return partial_sold or None
 
     # ------------------------------------------------------------------
-    async def _on_ws_buy(self, token_addr: str, wallet_addr: str):
+    async def _on_ws_buy(self, token_addr: str, wallet_addr: str,
+                         whale_price: float | None = None):
         """
         WebSocket callback — called within seconds of an alpha wallet buying.
 
         Pipeline:
             1. Probe Jupiter to confirm token is tradeable (skip DexScreener wait)
-            2. Push to scanner.pending_copy WITH the Jupiter probe data
-            3. The main scan loop picks it up: uses Jupiter liquidity if DexScreener stale
+            2. LATE-ENTRY GATE: compare current price to the whale's entry price.
+               If we're already > +15% above where the whale got in, skip — we'd
+               be buying their exit liquidity.
+            3. Push to scanner.pending_copy WITH the Jupiter probe data
+            4. The main scan loop picks it up: uses Jupiter liquidity if DexScreener stale
 
-        Critical : the Jupiter probe data is stored in pending_copy so that when
-        the scanner later builds the MemeCoin, it can use Jupiter's liquidity
-        estimate when DexScreener reports $0 (stale on freshly migrated tokens).
-        This unlocks the most explosive 5-min entry window.
+        whale_price: lamports of SOL the whale paid per raw token (from the parsed
+        tx). The probe returns the same unit (in_amount lamports / out_amount raw
+        tokens), so they're directly comparable.
         """
         # Probe Jupiter: is this token tradeable right now?
         try:
             probe = await jupiter.probe_token_tradeable(token_addr, probe_amount_sol=0.005)
         except Exception:
             probe = None
+
+        # ── LATE-ENTRY GATE — only copy if we're close to the whale's price ──
+        if probe and probe.get("tradeable") and whale_price and whale_price > 0:
+            in_amt = probe.get("in_amount", 0)
+            out_amt = probe.get("out_amount", 0)
+            if in_amt > 0 and out_amt > 0:
+                current_price = in_amt / out_amt  # lamports per raw token (same unit as whale_price)
+                premium = (current_price - whale_price) / whale_price
+                if premium > MAX_WHALE_PREMIUM:
+                    self.log(
+                        f"  ⏭️ [WS] Skip {token_addr[:8]}... — already +{premium*100:.0f}% "
+                        f"above whale entry (max +{MAX_WHALE_PREMIUM*100:.0f}%)"
+                    )
+                    # Still track the signal for wallet stats, but don't push it as actionable
+                    self.scanner.add_copy_signal(token_addr, wallet_addr, jupiter_probe=None)
+                    return
+                else:
+                    self.log(
+                        f"  🎯 [WS] {token_addr[:8]}... entry +{premium*100:.0f}% vs whale — within window"
+                    )
 
         # Always push the signal (so wallet stats are tracked).
         # Pass the probe so the scanner can use it later (even None is fine).
@@ -1296,6 +1367,14 @@ Chart     : https://dexscreener.com/solana/{token.address}
                     print(self.format_signal(token, score, validation.get("rug", {})))
 
                     entry_price = token.price_usd
+
+                    # Capture balance BEFORE the buy — with MAX_CONCURRENT_TRADES=1,
+                    # (final_balance - balance_before_buy) is the EXACT realized PnL.
+                    try:
+                        balance_before_buy = await wallet.get_sol_balance(self.pubkey)
+                    except Exception:
+                        balance_before_buy = None
+
                     bought = await self.execute_buy(token)
                     if not bought:
                         self.log(f"Buy {token.symbol} failed")
@@ -1308,6 +1387,8 @@ Chart     : https://dexscreener.com/solana/{token.address}
                         "token": token,
                         "entry_price": entry_price,
                         "entry_time": time.time(),
+                        "balance_before_buy": balance_before_buy,
+                        "source_wallets": getattr(token, "source_wallets", []),
                     }
 
                     # Both new_listing and copy_trade use MOON behavior
@@ -1330,74 +1411,85 @@ Chart     : https://dexscreener.com/solana/{token.address}
 
     # ------------------------------------------------------------------
     async def _handle_trade(self, token: MemeCoin, entry_price: float, moon_mode: bool = False):
-        trade_start_ts = self.active_trades.get(token.address, {}).get("entry_time", time.time())
-        # Snapshot balance BEFORE close to compute realized PnL
-        try:
-            bal_before = await wallet.get_sol_balance(self.pubkey)
-        except Exception:
-            bal_before = None
+        trade_info = self.active_trades.get(token.address, {})
+        trade_start_ts = trade_info.get("entry_time", time.time())
+        balance_before_buy = trade_info.get("balance_before_buy")
+        source_wallets = trade_info.get("source_wallets", []) or []
+
         try:
             result = await self.monitor_and_sell(token, entry_price, moon_mode=moon_mode)
-            # Determine result tag
-            if result is True:
-                self.wins += 1
-                result_tag = "WIN"
-                self.log(f"✅ WIN {token.symbol} | {self.wins}W/{self.losses}L")
-            elif result is False:
-                self.losses += 1
-                result_tag = "LOSS"
-                # 24h blacklist — avoid re-entering on a token in distribution
-                self.sl_blacklist[token.address] = time.time() + SL_BLACKLIST_HOURS * 3600
-                self.log(f"❌ LOSS {token.symbol} → blacklist {SL_BLACKLIST_HOURS}h | {self.wins}W/{self.losses}L")
-            else:
-                result_tag = "UNCERTAIN"
-                # None = sell failed (network/DNS) OR neutral timeout
-                # Tokens may still be in the wallet → critical warning
-                self.log(
-                    f"⚠️ SELL UNCERTAIN {token.symbol} — "
-                    f"check wallet, tokens may be unsold | {self.wins}W/{self.losses}L"
-                )
 
-            # Per-trade history log (used by the dashboard for trade table + streak)
+            # ── REAL PnL: balance_before_buy → final balance (concurrency=1) ──
+            await asyncio.sleep(3)  # let on-chain settle
             try:
-                await asyncio.sleep(2)
-                bal_after = await wallet.get_sol_balance(self.pubkey)
-                pnl_sol = (bal_after - bal_before) if bal_before is not None else None
+                final_balance = await wallet.get_sol_balance(self.pubkey)
+            except Exception:
+                final_balance = None
+            if balance_before_buy is not None and final_balance is not None:
+                pnl_sol = final_balance - balance_before_buy
+            else:
+                pnl_sol = None
+
+            # ── Classify by REAL PnL, not just the monitor's exit reason ──
+            # The monitor returns True/False/None based on exit logic, but the
+            # ground truth is the realized SOL delta. A "trailing stop WIN" that
+            # actually netted -8% is a LOSS. Trust the money.
+            if result is None:
+                result_tag = "UNCERTAIN"
+                self.log(
+                    f"⚠️ SELL UNCERTAIN {token.symbol} — check wallet, tokens may be unsold"
+                )
+            elif pnl_sol is not None:
+                if pnl_sol > 0:
+                    self.wins += 1
+                    result_tag = "WIN"
+                    self.log(f"✅ WIN {token.symbol} {pnl_sol:+.4f} SOL | {self.wins}W/{self.losses}L")
+                else:
+                    self.losses += 1
+                    result_tag = "LOSS"
+                    self.sl_blacklist[token.address] = time.time() + SL_BLACKLIST_HOURS * 3600
+                    self.log(f"❌ LOSS {token.symbol} {pnl_sol:+.4f} SOL → blacklist {SL_BLACKLIST_HOURS}h | {self.wins}W/{self.losses}L")
+            else:
+                # Fallback to monitor's verdict if we couldn't read balance
+                if result is True:
+                    self.wins += 1
+                    result_tag = "WIN"
+                    self.log(f"✅ WIN {token.symbol} (PnL unknown) | {self.wins}W/{self.losses}L")
+                else:
+                    self.losses += 1
+                    result_tag = "LOSS"
+                    self.sl_blacklist[token.address] = time.time() + SL_BLACKLIST_HOURS * 3600
+                    self.log(f"❌ LOSS {token.symbol} (PnL unknown) | {self.wins}W/{self.losses}L")
+
+            # ── Feed wallet profit scoring (#5) — credit ALL contributing wallets ──
+            if source_wallets and pnl_sol is not None:
+                for w in source_wallets:
+                    self.scanner.record_wallet_trade_result(w, pnl_sol)
+
+            # ── Per-trade history log (dashboard) ──
+            try:
                 self._append_trade_log({
                     "ts_open": trade_start_ts,
                     "ts_close": time.time(),
                     "iso_close": datetime.now().isoformat(),
                     "symbol": token.symbol,
                     "address": token.address,
-                    "mode": "MOON" if moon_mode else "NORMAL",
+                    "mode": "ULTRA_EARLY" if self.is_ultra_early(token) else ("MOON" if moon_mode else "NORMAL"),
                     "entry_price": entry_price,
                     "result": result_tag,
                     "wallet_hits": getattr(token, "wallet_hit_count", 0),
-                    "bal_before": bal_before,
-                    "bal_after": bal_after,
+                    "source_wallets": source_wallets,
+                    "bal_before": balance_before_buy,
+                    "bal_after": final_balance,
                     "pnl_sol": pnl_sol,
                 })
             except Exception:
                 pass
 
-            # Update daily PnL counter ONLY when all trades are CLOSED.
-            # Bug context: previous version read balance mid-trade (while tokens were
-            # still held), which under-reports the balance by ~the position size
-            # and falsely triggers the circuit breaker on a tiny actual loss.
-            # By waiting until len(active_trades) == 1 (just this one being closed)
-            # AND popping it first, we ensure balance reflects only closed trades.
-            #
-            # Note: active_trades is popped in the `finally` block right after this,
-            # so we check ≤1 (this trade still in there) and skip if other trades open.
+            # ── Daily PnL (now accurate with concurrency=1) ──
             try:
-                # Only update if THIS trade is the last open one
-                if len(self.active_trades) <= 1:
-                    # Brief sleep to let the on-chain settlement reflect in balance
-                    await asyncio.sleep(3)
-                    new_bal = await wallet.get_sol_balance(self.pubkey)
-                    if self.daily_start_balance > 0:
-                        self.daily_pnl_sol = new_bal - self.daily_start_balance
-                # else: another trade is still open → wait for it to close
+                if final_balance is not None and self.daily_start_balance > 0:
+                    self.daily_pnl_sol = final_balance - self.daily_start_balance
             except Exception:
                 pass
 

@@ -79,6 +79,11 @@ class WebSocketMonitor:
         self._parse_sem = asyncio.Semaphore(50)  # max 50 parallel tx parses
         # Track subscription ID → wallet address (for inverse lookup)
         self._sub_to_wallet: dict[int, str] = {}
+        # #6 Scalper detection — track recent buys to catch quick buy→sell churn
+        self._recent_buys: dict[tuple, float] = {}      # (wallet, mint) → buy ts
+        self._scalper_events: dict[str, list] = {}      # wallet → [ts of quick flips]
+        self.SCALPER_WINDOW = 300                        # 5 min buy→sell = scalp
+        self.SCALPER_THRESHOLD = 3                       # 3+ flips in 1h → flagged
         # Stats
         self.stats = {
             "logs_received": 0,
@@ -203,14 +208,44 @@ class WebSocketMonitor:
                 if not tx:
                     return
                 self.stats["txs_parsed"] += 1
+
+                # #6 — detect SELLS first, to catch buy→sell churn (scalper)
+                sells = self._extract_sells(tx, wallet)
+                now = time.time()
+                for mint in sells:
+                    bought_ts = self._recent_buys.get((wallet, mint))
+                    if bought_ts and (now - bought_ts) < self.SCALPER_WINDOW:
+                        # Quick flip: bought then sold same token within the window
+                        self._scalper_events.setdefault(wallet, []).append(now)
+                        # Keep only last hour of events
+                        self._scalper_events[wallet] = [
+                            t for t in self._scalper_events[wallet] if now - t < 3600
+                        ]
+
                 buys = self._extract_buys(tx, wallet)
-                for token_addr in buys:
+                for buy in buys:
+                    token_addr = buy["mint"]
+                    whale_price = buy.get("whale_price")
+                    self._recent_buys[(wallet, token_addr)] = now
                     self.stats["buys_detected"] += 1
+
+                    # Suppress signals from flagged scalpers
+                    if self.is_scalper(wallet):
+                        self.log(f"🚫 {wallet[:8]}... BUY {token_addr[:8]}... suppressed (scalper)")
+                        continue
+
                     self.log(f"🔁 {wallet[:8]}... → BUY {token_addr[:8]}... (sig {signature[:12]}...)")
                     try:
-                        await self.on_buy_callback(token_addr, wallet)
+                        await self.on_buy_callback(token_addr, wallet, whale_price)
                     except Exception as e:
                         self.log(f"⚠️ callback error: {type(e).__name__}: {e}")
+
+                # Bounded cleanup of _recent_buys
+                if len(self._recent_buys) > 2000:
+                    cutoff = now - self.SCALPER_WINDOW
+                    self._recent_buys = {
+                        k: v for k, v in self._recent_buys.items() if v > cutoff
+                    }
             except Exception as e:
                 self.stats["errors"] += 1
 
@@ -252,10 +287,22 @@ class WebSocketMonitor:
 
     # ─────────────────────────────────────────────────────────────────
     @staticmethod
-    def _extract_buys(tx: dict, wallet: str) -> list[str]:
+    def _extract_buys(tx: dict, wallet: str) -> list[dict]:
         """
         Compare preTokenBalances vs postTokenBalances for the given wallet.
-        Return list of mint addresses where balance INCREASED (= bought).
+        Return a list of dicts for each token the wallet BOUGHT:
+            {
+              "mint": str,
+              "tokens_raw": int,        # raw token units received
+              "whale_price": float|None # lamports of SOL spent per raw token
+            }
+
+        whale_price lets us compare the whale's entry to the current price
+        (the Jupiter probe returns the same unit: lamports per raw token).
+        If we enter > +15% above the whale, we're buying their exit liquidity.
+
+        whale_price is None if we can't compute SOL spent reliably (then the
+        caller doesn't apply the late-entry gate — fail open, not closed).
         """
         bought = []
         meta = tx.get("meta", {})
@@ -265,21 +312,92 @@ class WebSocketMonitor:
         pre = meta.get("preTokenBalances", []) or []
         post = meta.get("postTokenBalances", []) or []
 
-        pre_map: dict[str, float] = {}
+        # Map mint → raw amount (pre) for this wallet
+        pre_raw: dict[str, int] = {}
         for b in pre:
             if b.get("owner") == wallet:
                 mint = b.get("mint", "")
-                amount = float(b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
-                pre_map[mint] = amount
+                raw = int(b.get("uiTokenAmount", {}).get("amount", "0") or 0)
+                pre_raw[mint] = raw
+
+        # Compute the wallet's net SOL spent this tx (lamports), for price calc.
+        whale_sol_spent = WebSocketMonitor._wallet_sol_delta(tx, wallet)
 
         for b in post:
             if b.get("owner") == wallet:
                 mint = b.get("mint", "")
-                post_amount = float(b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
-                pre_amount = pre_map.get(mint, 0)
-                if post_amount > pre_amount and post_amount > 0:
-                    bought.append(mint)
+                post_raw = int(b.get("uiTokenAmount", {}).get("amount", "0") or 0)
+                pre_amount = pre_raw.get(mint, 0)
+                delta = post_raw - pre_amount
+                if delta > 0:
+                    whale_price = None
+                    if whale_sol_spent and whale_sol_spent > 0 and delta > 0:
+                        whale_price = whale_sol_spent / delta  # lamports per raw token
+                    bought.append({
+                        "mint": mint,
+                        "tokens_raw": delta,
+                        "whale_price": whale_price,
+                    })
         return bought
+
+    @staticmethod
+    def _extract_sells(tx: dict, wallet: str) -> list[str]:
+        """Return mints where the wallet's balance DECREASED (= sold)."""
+        sold = []
+        meta = tx.get("meta", {})
+        if meta.get("err"):
+            return sold
+        pre = meta.get("preTokenBalances", []) or []
+        post = meta.get("postTokenBalances", []) or []
+        pre_raw: dict[str, int] = {}
+        for b in pre:
+            if b.get("owner") == wallet:
+                pre_raw[b.get("mint", "")] = int(b.get("uiTokenAmount", {}).get("amount", "0") or 0)
+        post_raw: dict[str, int] = {}
+        for b in post:
+            if b.get("owner") == wallet:
+                post_raw[b.get("mint", "")] = int(b.get("uiTokenAmount", {}).get("amount", "0") or 0)
+        for mint, pre_amt in pre_raw.items():
+            post_amt = post_raw.get(mint, 0)
+            if post_amt < pre_amt:  # balance dropped = sold (partial or full)
+                sold.append(mint)
+        return sold
+
+    def is_scalper(self, wallet: str) -> bool:
+        """True if the wallet has done ≥ SCALPER_THRESHOLD quick flips in the last hour."""
+        events = self._scalper_events.get(wallet, [])
+        now = time.time()
+        recent = [t for t in events if now - t < 3600]
+        return len(recent) >= self.SCALPER_THRESHOLD
+
+    @staticmethod
+    def _wallet_sol_delta(tx: dict, wallet: str) -> int | None:
+        """
+        Net lamports the wallet spent in this tx (positive = SOL went out).
+        Reads preBalances/postBalances indexed by accountKeys.
+        Returns None if the wallet's account index can't be resolved.
+        """
+        try:
+            meta = tx.get("meta", {})
+            msg = tx.get("transaction", {}).get("message", {})
+            keys = msg.get("accountKeys", []) or []
+            # accountKeys can be list of strings or list of {pubkey:...}
+            idx = None
+            for i, k in enumerate(keys):
+                pk = k if isinstance(k, str) else k.get("pubkey", "")
+                if pk == wallet:
+                    idx = i
+                    break
+            if idx is None:
+                return None
+            pre = meta.get("preBalances", []) or []
+            post = meta.get("postBalances", []) or []
+            if idx >= len(pre) or idx >= len(post):
+                return None
+            spent = pre[idx] - post[idx]  # lamports out (includes tx fee, negligible)
+            return spent if spent > 0 else None
+        except Exception:
+            return None
 
     # ─────────────────────────────────────────────────────────────────
     def stop(self):

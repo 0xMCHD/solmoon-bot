@@ -69,6 +69,9 @@ class MemeCoin:
         # Number of alpha wallets that bought this token (1 = normal signal, 2+ = strong signal)
         self.wallet_hit_count: int = 0
 
+        # The alpha wallet addresses that triggered this copy signal (for profit attribution)
+        self.source_wallets: list[str] = []
+
         # Liquidity source flag — True if liquidity_usd comes from Jupiter probe (vs DexScreener)
         # When True, the token is very fresh (DexScreener hasn't indexed yet) → relax filters
         self.liquidity_from_jupiter: bool = False
@@ -204,11 +207,63 @@ class MemeScanner:
         if wallet_addr not in self.wallet_signal_stats:
             self.wallet_signal_stats[wallet_addr] = {
                 "sent": 0, "resolved": 0, "expired": 0,
+                "trades": 0, "wins": 0, "total_pnl_sol": 0.0,
                 "first_seen": time.time(),
             }
         self.wallet_signal_stats[wallet_addr][key] = (
             self.wallet_signal_stats[wallet_addr].get(key, 0) + 1
         )
+
+    def record_wallet_trade_result(self, wallet_addr: str, pnl_sol: float):
+        """
+        #5 PROFIT-WEIGHTED SCORING — credit/debit a wallet with a realized trade PnL.
+
+        Resolution rate (token became tradeable) ≠ profitability. A wallet can
+        resolve 90% of signals and lose money on every one. This tracks the
+        thing that actually matters: did copying this wallet make money?
+
+        Used by #7 (dynamic position sizing) to bet more on profitable wallets.
+        """
+        if not wallet_addr:
+            return
+        if wallet_addr not in self.wallet_signal_stats:
+            self.wallet_signal_stats[wallet_addr] = {
+                "sent": 0, "resolved": 0, "expired": 0,
+                "trades": 0, "wins": 0, "total_pnl_sol": 0.0,
+                "first_seen": time.time(),
+            }
+        s = self.wallet_signal_stats[wallet_addr]
+        s["trades"] = s.get("trades", 0) + 1
+        if pnl_sol > 0:
+            s["wins"] = s.get("wins", 0) + 1
+        s["total_pnl_sol"] = round(s.get("total_pnl_sol", 0.0) + pnl_sol, 6)
+        self._save_wallet_stats()
+
+    def wallet_quality(self, wallet_addr: str) -> float:
+        """
+        #7 — quality multiplier in [0.5, 1.5] for position sizing.
+
+        Based on realized profit history:
+            - No trade history yet      → 1.0 (neutral)
+            - Net profitable + WR ≥ 50% → up to 1.5
+            - Net losing                → down to 0.5
+
+        Needs ≥3 trades to deviate from neutral (avoid overfitting on noise).
+        """
+        s = self.wallet_signal_stats.get(wallet_addr, {})
+        trades = s.get("trades", 0)
+        if trades < 3:
+            return 1.0
+        wins = s.get("wins", 0)
+        wr = wins / trades
+        total_pnl = s.get("total_pnl_sol", 0.0)
+        avg_pnl = total_pnl / trades
+        # Profitable + good WR → boost; losing → shrink
+        if avg_pnl > 0 and wr >= 0.5:
+            return min(1.5, 1.0 + avg_pnl * 20)   # avg +0.025 SOL/trade → ~1.5×
+        if avg_pnl < 0:
+            return max(0.5, 1.0 + avg_pnl * 20)   # avg -0.025 SOL/trade → ~0.5×
+        return 1.0
 
     def log_wallet_performance(self):
         """Print a leaderboard of wallet signal performance. Call periodically."""
@@ -514,6 +569,7 @@ class MemeScanner:
                                         mc.copy_trade = True
                                         info = self.pending_copy.get(mc.address, {})
                                         mc.wallet_hit_count = len(info.get("wallets", set()))
+                                        mc.source_wallets = list(info.get("wallets", set()))
 
                                         # ── Jupiter probe injection ────────────
                                         # If DexScreener reports stale/zero liquidity but we
@@ -562,6 +618,7 @@ class MemeScanner:
                         mc.copy_trade = True
                         info = self.pending_copy.get(mc.address, {})
                         mc.wallet_hit_count = len(info.get("wallets", set()))
+                        mc.source_wallets = list(info.get("wallets", set()))
                         n_copy += 1
 
             except Exception as e:

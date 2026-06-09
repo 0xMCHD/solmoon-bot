@@ -143,6 +143,118 @@ async def probe_token_tradeable(token_mint: str,
     }
 
 
+async def _raw_order(input_mint: str, output_mint: str, amount: int,
+                     slippage_bps: int = 500) -> dict | None:
+    """Bare Jupiter /order call (no taker). Returns parsed JSON or None."""
+    params = {
+        "inputMint": input_mint,
+        "outputMint": output_mint,
+        "amount": str(amount),
+        "slippageBps": slippage_bps,
+        "dynamicComputeUnitLimit": "true",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=6) as client:
+            resp = await client.get(
+                f"{config.JUPITER_API_URL}/order",
+                params=params,
+                headers=_headers(),
+            )
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except Exception:
+        return None
+
+
+async def simulate_round_trip(token_mint: str,
+                              probe_amount_sol: float = 0.01) -> dict:
+    """
+    HONEYPOT DETECTION — the single most important capital protector.
+
+    A honeypot lets you BUY but blocks (or heavily taxes) the SELL.
+    rugcheck.xyz lags on fresh tokens, so we detect it ourselves by
+    simulating the full round trip:
+
+        1. Probe BUY  : probe_amount_sol SOL  → X tokens
+        2. Probe SELL : X tokens              → Y SOL
+        3. Round-trip loss = (probe_amount_sol - Y) / probe_amount_sol
+
+    Verdict :
+        - No BUY route        → not tradeable (skip, but not a honeypot)
+        - No SELL route       → 🍯 HONEYPOT (can't exit) → REJECT
+        - sell_impact >> buy  → thin exit liquidity → REJECT
+        - round-trip loss>30% → hidden tax / honeypot → REJECT
+
+    Returns dict:
+        safe              : bool — True only if round trip is clean
+        reason            : str  — why it was rejected (or "ok")
+        buy_impact        : float
+        sell_impact       : float
+        round_trip_loss   : float (fraction, e.g. 0.12 = lost 12%)
+        sellable          : bool — a SELL route exists at all
+    """
+    result = {
+        "safe": False, "reason": "", "buy_impact": 0.0, "sell_impact": 0.0,
+        "round_trip_loss": 1.0, "sellable": False,
+    }
+
+    sol_lamports = int(probe_amount_sol * config.LAMPORTS_PER_SOL)
+
+    # ── Step 1: BUY probe (SOL → token) ──────────────────────────────
+    buy = await _raw_order(config.SOL_MINT, token_mint, sol_lamports, slippage_bps=500)
+    if not buy:
+        result["reason"] = "no BUY route (not tradeable)"
+        return result
+    token_out = int(buy.get("outAmount", 0))
+    if token_out <= 0:
+        result["reason"] = "BUY returns zero tokens"
+        return result
+    try:
+        result["buy_impact"] = abs(float(buy.get("priceImpactPct", "0") or 0))
+    except Exception:
+        pass
+
+    # ── Step 2: SELL probe (token → SOL) ─────────────────────────────
+    # Sell back the exact amount we'd receive from the buy.
+    sell = await _raw_order(token_mint, config.SOL_MINT, token_out, slippage_bps=500)
+    if not sell:
+        # Can buy but NOT sell → textbook honeypot
+        result["reason"] = "🍯 HONEYPOT — no SELL route (can buy, can't exit)"
+        return result
+    sol_back = int(sell.get("outAmount", 0))
+    if sol_back <= 0:
+        result["reason"] = "🍯 HONEYPOT — SELL returns zero SOL"
+        return result
+    result["sellable"] = True
+    try:
+        result["sell_impact"] = abs(float(sell.get("priceImpactPct", "0") or 0))
+    except Exception:
+        pass
+
+    # ── Step 3: round-trip economics ─────────────────────────────────
+    round_trip_loss = (sol_lamports - sol_back) / sol_lamports
+    result["round_trip_loss"] = round_trip_loss
+
+    # A clean token loses ~1-3% on a tiny round trip (just the 2× swap spread).
+    # 30%+ loss on a $1.50 probe = hidden transfer tax or near-honeypot.
+    if round_trip_loss > 0.30:
+        result["reason"] = f"hidden tax / near-honeypot — round trip loses {round_trip_loss*100:.0f}%"
+        return result
+
+    # Asymmetric impact: sell impact 5× the buy impact = thin exit / one-way pool
+    if result["buy_impact"] > 0 and result["sell_impact"] > result["buy_impact"] * 5 and result["sell_impact"] > 3:
+        result["reason"] = (
+            f"thin exit — sell impact {result['sell_impact']:.1f}% vs "
+            f"buy {result['buy_impact']:.1f}%"
+        )
+        return result
+
+    result["safe"] = True
+    result["reason"] = "ok"
+    return result
+
+
 async def get_quote(input_mint: str,
                     output_mint: str,
                     amount_lamports: int,
